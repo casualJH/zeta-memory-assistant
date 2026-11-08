@@ -631,6 +631,7 @@
     const mem=roomData.memory,allowed=chunkRows.map(x=>x.id),idMap=new Map(chunkRows.map(x=>[x.id,x]));
     let changed=0;
     const timeCueConsumed=new Set();
+    const chunkTimelineStart=mem.timeline.length;
     const indexMap=new Map(chunkRows.map((r,i)=>[r.id,i]));
     const events=safeArray(delta.events).slice(0,160).map((ev,i)=>{
       const ids=sanitizeSources(ev?.sourceIds,allowed);
@@ -668,6 +669,19 @@
       else if(advance&&mem.absoluteDate)mem.absoluteDate=daysAfter(mem.absoluteDate,advance);
       const label=occurrenceDate?prettyDate(occurrenceDate):historical?'과거 · 날짜 불명':
         mem.absoluteDate?prettyDate(mem.absoluteDate):`D+${mem.dayIndex}`;
+      // Combine consecutive micro-events rooted in the same original message.
+      // Keep independent long episodes and important turning points separate.
+      const previous=mem.timeline.length>chunkTimelineStart?mem.timeline[mem.timeline.length-1]:null;
+      const sameEvidence=previous&&sourceIds.some(id=>safeArray(previous.sourceIds).includes(id));
+      const isMicro=description.length<180&&previous?.description?.length<600;
+      const canJoin=sameEvidence&&isMicro&&previous.label===label&&previous.timeType===(historical?'past':'present')&&
+        previous.importance!=='critical'&&ev.importance!=='critical'&&
+        previous.description.length+description.length<900;
+      if(canJoin){
+        previous.description+=(/[.!?。]$/.test(previous.description)?' ':'; ')+description;
+        previous.sourceIds=[...new Set([...previous.sourceIds,...sourceIds])].slice(0,20);
+        continue;
+      }
       mem.timeline.push({id:newId('event'),label,dayIndex:historical?null:mem.dayIndex,
         storyDate:occurrenceDate||(!historical?mem.absoluteDate:null),timeType:historical?'past':'present',
         revealDayIndex:mem.dayIndex,orderInSource:sequence,description,
