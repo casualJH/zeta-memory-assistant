@@ -767,7 +767,7 @@
         const rows=chunks[0];
         setStatus(`Gemini 분석 중 · 이번 묶음 ${rows.length}개 · 남은 묶음 ${chunks.length}개`);
         let delta;
-        try{delta=await askGemini(analysisPrompt(rows),5000,room);}catch(e){roomData.usage.errors++;await saveRoom();throw e;}
+        try{delta=await askGemini(analysisPrompt(rows),10000,room);}catch(e){roomData.usage.errors++;await saveRoom();throw e;}
         if(analysisStop||room!==activeRoom||epoch!==syncEpoch)break;
         const changes=mergePatch(delta,rows);
         const done=new Set(roomData.memory.processedIds);
@@ -888,7 +888,7 @@
     const m=roomData?.memory;if(!m)return '';
     const critical=m.facts.filter(f=>f.importance==='critical'||f.manual),important=m.facts.filter(f=>f.importance==='high');
     const maxEvents=mode==='brief'?25:mode==='normal'?120:10000;
-    const maxChars=mode==='brief'?2800:mode==='normal'?8000:28000;
+    const maxChars=mode==='brief'?2800:mode==='normal'?8000:28000; // Only copied reminder text is capped; stored memories are not.
     let parts=['[과거 서사 상기]','이 자료는 실제 대화 및 사용자가 직접 지정한 설정을 바탕으로 한 참고 기록입니다. 기록에 없는 사건·대사·설정을 추가하지 마세요.'];
     if(m.pinnedText.trim())parts.push('\n■ 사용자 고정 지침\n'+m.pinnedText.trim());
     if(critical.length)parts.push('\n■ 확정·핵심 설정\n'+critical.map(f=>'- '+f.text).join('\n'));
