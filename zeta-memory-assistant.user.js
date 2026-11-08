@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         제타 AI 기억력 보조 (서사·모순·상기)
 // @namespace    zeta-memory-assistant
-// @version      0.0.10
+// @version      0.1.0
 // @description  과거 대화 로컬 보관, Gemini 서사 기억, 모순 의심 표시, 정정·상기 복사, 기억 검색
 // @updateURL    https://raw.githubusercontent.com/casualJH/zeta-memory-assistant/main/zeta-memory-assistant.user.js
 // @downloadURL  https://raw.githubusercontent.com/casualJH/zeta-memory-assistant/main/zeta-memory-assistant.user.js
@@ -30,7 +30,7 @@
   'use strict';
   if (window.__zetaMemoryAssistantV1) return;
   window.__zetaMemoryAssistantV1 = true;
-  const VERSION = '0.0.10';
+  const VERSION = '0.1.0';
   const DB_NAME = 'zeta-memory-assistant-db-v1';
   const UUID = /^[0-9a-f]{8}-(?:[0-9a-f]{4}-){3}[0-9a-f]{12}$/i;
   const CHANNEL = 'zmm-' + Array.from(crypto.getRandomValues(new Uint8Array(12)), n => n.toString(16).padStart(2, '0')).join('');
@@ -739,7 +739,7 @@
   }
   function analysisPrompt(rows){
     const payload=rows.map((m,i)=>({id:m.id,order:i,speaker:m.speaker,role:m.role,kind:m.kind,text:m.text.slice(0,18000)}));
-    const guidance="역할: RP 기록 보관자. 다음 대화가 정확히 이어질 수 있도록 원문 기반 서사를 보존한다. 요약 길이를 맞추려 디테일을 삭제하지 말고 원문에 없는 사건·대사·심리를 만들지 않는다.\n\n사건: 한 API 묶음이나 한 메시지가 사건 하나라는 뜻이 아니다. 행동 목적, 갈등 흐름, 원인, 대응, 결과, 관계 변화로 구분한다. 같은 갈등을 해결하는 연결 행동과 반응은 자세히 하나로 묶되, 새로운 갈등·약속·결정·중요한 관계 변화는 별개 사건으로 나눈다. 단순한 장소 이동이나 등장만으로 사건을 분리하지 않는다. 각 사건은 누가, 왜, 무엇을 했고 상대가 어떻게 반응했는지와 결과를 구체적으로 적는다.\n\n순서: 입력 원문의 order는 채팅 출력 순서이지 세계관 날짜가 아니다. events를 사건 근거의 순서대로 반환하고, 한 원문에 여러 사건이 있으면 orderInSource를 0,1,2...로 표시한다. sourceIds에 해당 사건의 정확한 메시지 ID를 적는다. 나중에 밝혀진 과거 사건은 timeType=past로, 현재 사건은 present로 명시한다. 과거 사실이 지금 공개된 일 자체도 중요하면 현재의 공개 사건을 따로 기록한다.\n\n날짜: 실제 채팅 작성 날짜를 이야기 날짜로 쓰지 않는다. 사건 근거에 연월일이 명시되었을 때만 absoluteDate=YYYY-MM-DD, 아니면 null. 다음 날·사흘 뒤 같은 명백한 시간 경과의 첫 사건에만 advanceDays를 사용한다. 위젯·상태창은 참고하지만 본문과 충돌하면 본문 우선. 일시적 속마음이나 계획을 실행된 일로 기록하지 않는다. 모르면 불명으로 남긴다.\n\n감정: 지속적으로 행동에 영향을 미치는 감정을 emotions에서 인물→대상 방향으로 적고 종류·강도·원인·행동 패턴을 보존한다. 일시적 감정이나 해결된 감정은 현재 감정선에 넣지 않는다. 명시적 감정은 explicit, 반복 행동에 근거한 해석은 inferred, 근거가 불충분하면 기록하지 않는다. 보호심이나 끌림을 사랑으로 확대하지 않는다.\n\n관계: relations의 status는 현재 관계 단계와 애정·신뢰 방식, 갈등 해결 방식, 거리감, 주도권, 상호 인식 차이를 가능한 한 구체적으로 포함한다. 지속 중인 관계와 이미 해소된 과거 상태를 구분하고, 최신 확정 변화만 반영한다.\n\n현재 장면: currentState는 이번 입력의 가장 마지막으로 진행된 실제 장면이다. 장소·등장 인물·진행 중 갈등·마지막 상황을 구체적으로 적는다. 이 묶음의 마지막을 전체 스토리의 마지막이라고 단정하지 않는다.\n\n미해결: clues에 진행 중인 갈등, 미이행 약속·합의·조건·일정·복선의 현재 영향 및 위험을 보존한다. 완료·취소된 약속을 현재 유효한 것으로 기록하지 않는다. knowledge에서 누가 무엇을 알고 모르는지 구분한다. 미확인 내면·미래 사건을 확정하지 않는다.\n\n대사와 근거: 고백·협박·약속·선언·관계가 변한 대사는 실제 원문에 있는 표현만 큰따옴표로 인용한다. 의역은 따옴표 없이 간접 서술한다. OOC는 작품 사건이 아니다. 모순 issues는 최신 캐릭터 지문에 실재하는 연속 문자열을 quote로 제시하며 거짓말·반전·오해를 무조건 모순으로 단정하지 않는다.\n\n출력: 글자 수·사건 수 할당량이 없다. 누락을 줄이기 위해 모든 원문 메시지를 확인하되 사건을 억지로 늘리지 않는다. 응답은 코드 블록 없이 JSON 객체 하나. 원문이 없는 항목은 빈 배열, 미상 가족·비밀은 빈 문자열. sourceIds는 실제 제공된 row ID만 사용한다.";
+    const guidance="역할: RP 기록 보관자. 다음 대화가 정확히 이어질 수 있도록 원문 기반 서사를 보존한다. 요약 길이를 맞추려 디테일을 삭제하지 말고 원문에 없는 사건·대사·심리를 만들지 않는다.\n\n사건: 타임라인의 한 항목은 한 문장이나 한 동작이 아니라 한 장면의 완결된 사건 흐름(에피소드)이다. 대화 한두 줄, 몸짓, 감정 표현, 인물 등장, 장소 이동을 각각 독립 사건으로 작성하지 마라. 같은 목표·상황·갈등을 중심으로 이어진 행동→상대 반응→추가 행동→결과를 가능한 한 하나의 충분히 상세한 사건 문단으로 묶는다. 같은 장면의 작은 반응은 사건 설명 속에 포함한다. 독립된 새 갈등이 시작되거나 중요한 약속·결정·관계 전환 또는 결과가 확정될 때만 별도 항목으로 나눈다. 사건 하나에는 충분한 원문 근거와 인물별 행동·대사·변화 과정을 여러 문장으로 기록하며, 'A는 도발적이다'와 같은 성격·상태만을 사건으로 만들지 않는다. 사건 수를 늘리는 것이 아니라 실제 전개를 누락 없이 보존하는 것이 목표다. 한 날짜에 수십 개의 사소한 항목을 생성하지 말고 의미 있는 에피소드 중심으로 기록한다.\n\n순서: 입력 원문의 order는 채팅 출력 순서이지 세계관 날짜가 아니다. events를 사건 근거의 순서대로 반환하고, 한 원문에 여러 사건이 있으면 orderInSource를 0,1,2...로 표시한다. sourceIds에 해당 사건의 정확한 메시지 ID를 적는다. 나중에 밝혀진 과거 사건은 timeType=past로, 현재 사건은 present로 명시한다. 과거 사실이 지금 공개된 일 자체도 중요하면 현재의 공개 사건을 따로 기록한다.\n\n날짜: 실제 채팅 작성 날짜를 이야기 날짜로 쓰지 않는다. 사건 근거에 연월일이 명시되었을 때만 absoluteDate=YYYY-MM-DD, 아니면 null. 다음 날·사흘 뒤 같은 명백한 시간 경과의 첫 사건에만 advanceDays를 사용한다. 위젯·상태창은 참고하지만 본문과 충돌하면 본문 우선. 일시적 속마음이나 계획을 실행된 일로 기록하지 않는다. 모르면 불명으로 남긴다.\n\n감정: 지속적으로 행동에 영향을 미치는 감정을 emotions에서 인물→대상 방향으로 적고 종류·강도·원인·행동 패턴을 보존한다. 일시적 감정이나 해결된 감정은 현재 감정선에 넣지 않는다. 명시적 감정은 explicit, 반복 행동에 근거한 해석은 inferred, 근거가 불충분하면 기록하지 않는다. 보호심이나 끌림을 사랑으로 확대하지 않는다.\n\n관계: relations의 status는 현재 관계 단계와 애정·신뢰 방식, 갈등 해결 방식, 거리감, 주도권, 상호 인식 차이를 가능한 한 구체적으로 포함한다. 지속 중인 관계와 이미 해소된 과거 상태를 구분하고, 최신 확정 변화만 반영한다.\n\n현재 장면: currentState는 이번 입력의 가장 마지막으로 진행된 실제 장면이다. 장소·등장 인물·진행 중 갈등·마지막 상황을 구체적으로 적는다. 이 묶음의 마지막을 전체 스토리의 마지막이라고 단정하지 않는다.\n\n미해결: clues에 진행 중인 갈등, 미이행 약속·합의·조건·일정·복선의 현재 영향 및 위험을 보존한다. 완료·취소된 약속을 현재 유효한 것으로 기록하지 않는다. knowledge에서 누가 무엇을 알고 모르는지 구분한다. 미확인 내면·미래 사건을 확정하지 않는다.\n\n대사와 근거: 고백·협박·약속·선언·관계가 변한 대사는 실제 원문에 있는 표현만 큰따옴표로 인용한다. 의역은 따옴표 없이 간접 서술한다. OOC는 작품 사건이 아니다. 모순 issues는 최신 캐릭터 지문에 실재하는 연속 문자열을 quote로 제시하며 거짓말·반전·오해를 무조건 모순으로 단정하지 않는다.\n\n출력: 글자 수·사건 수 할당량이 없다. 누락을 줄이기 위해 모든 원문 메시지를 확인하되 사건을 억지로 늘리지 않는다. 응답은 코드 블록 없이 JSON 객체 하나. 원문이 없는 항목은 빈 배열, 미상 가족·비밀은 빈 문자열. sourceIds는 실제 제공된 row ID만 사용한다.";
     const format="{\"events\":[{\"description\":\"배경·행동·반응·결과·영향\",\"timeType\":\"present\",\"orderInSource\":0,\"advanceDays\":0,\"absoluteDate\":null,\"sourceIds\":[\"원문 ID\"],\"importance\":\"normal\"}],\"currentState\":{\"summary\":\"입력 마지막 실제 장면\",\"location\":\"\",\"people\":\"\",\"conflict\":\"\",\"sourceIds\":[\"원문 ID\"]},\"emotions\":[{\"person\":\"\",\"target\":\"\",\"feeling\":\"\",\"reason\":\"\",\"behavior\":\"\",\"certainty\":\"explicit\",\"sourceIds\":[\"원문 ID\"]}],\"facts\":[{\"text\":\"\",\"tag\":\"설정\",\"sourceIds\":[\"원문 ID\"],\"importance\":\"high\"}],\"characters\":[{\"name\":\"\",\"traits\":\"\",\"family\":\"\",\"secrets\":\"\",\"sourceIds\":[\"원문 ID\"]}],\"relations\":[{\"a\":\"\",\"b\":\"\",\"status\":\"현재 관계 유지 방식\",\"sourceIds\":[\"원문 ID\"]}],\"clues\":[{\"title\":\"\",\"detail\":\"현재 영향·미이행 조건\",\"status\":\"open\",\"sourceIds\":[\"원문 ID\"]}],\"knowledge\":[{\"character\":\"\",\"text\":\"\",\"status\":\"knows\",\"sourceIds\":[\"원문 ID\"]}],\"issues\":[{\"quote\":\"실제 최신 지문\",\"reason\":\"\",\"correction\":\"\",\"sourceIds\":[\"최신 원문 ID\"],\"evidenceIds\":[\"과거 원문 ID\"]}]}";
     return guidance+'\n\nJSON 예시 형식: '+format+
       '\n\n[기존 누적 기억 — 맥락 참고용, 과거 사건을 중복 생성하지 말 것]\n'+memoryContext()+
@@ -789,9 +789,9 @@
 
   function findSource(id){return msgMap.get(activeRoom+'|'+id)||orderedMessages().find(m=>m.messageId===id)||null;}
   function sourceButtons(ids){
-    const arr=safeArray(ids).slice(0,4);
+    const arr=[...new Set(safeArray(ids).filter(id=>typeof id==='string'&&id))].slice(0,4);
     if(!arr.length)return '<span class="zmm-muted">출처 없음 · 수동 입력</span>';
-    return `<div class="zmm-sources">${arr.map(id=>`<button class="zmm-tiny" data-act="source" data-id="${esc(id)}" title="대화 원문 보기">원문 ${esc(id.slice(-7))}</button>`).join('')}</div>`;
+    return `<div class="zmm-sources">${arr.map((id,i)=>`<button type="button" class="zmm-tiny" data-act="source" data-id="${esc(id)}" title="출처 원문 ${i+1} 보기">원문 ${i+1}</button>`).join('')}</div>`;
   }
   function importanceSelect(kind,item){
     const labels={critical:'핵심',high:'중요',normal:'일반',low:'사소'};
@@ -1013,10 +1013,11 @@
   }
   function sourceMarkup(){
     const msg=findSource(ui.previewSource);
-    if(!msg)return '';
-    return `<section class="zmm-archive"><h3>과거 대화 원문</h3><p class="zmm-muted">${esc(msg.speaker)} · 원본 메시지 ID ${esc(msg.messageId)}</p>
-      <pre>${esc(msg.text)}</pre><div class="zmm-row"><button class="zmm-main" data-act="jump" data-id="${esc(msg.id)}">실제 말풍선으로 이동</button>
-      <button data-act="copy-source" data-id="${esc(msg.id)}">원문 복사</button><button data-act="close-source">닫기</button></div></section>`;
+    if(!msg)return '<section class="zmm-archive"><h3>출처 원문</h3><p>원문을 찾지 못했습니다. 전체 대화 불러오기를 다시 실행해 주세요.</p><button data-act="close-source">목록으로 돌아가기</button></section>';
+    return `<section class="zmm-archive"><h3>출처 원문</h3><p class="zmm-muted">${esc(msg.speaker)} · ${esc(msg.kind==='info_box'?'상태창':'대화 지문')}</p>
+      <pre>${esc(msg.text)}</pre>
+      <div class="zmm-row"><button class="zmm-main" data-act="copy-source" data-id="${esc(msg.id)}">원문 복사</button><button data-act="close-source">목록으로 돌아가기</button></div>
+      <div class="zmm-row"><button data-act="jump" data-id="${esc(msg.id)}">채팅 말풍선으로 이동 (화면에 없으면 제한될 수 있음)</button></div></section>`;
   }
   function render(){
     if(!content)return;
@@ -1026,7 +1027,8 @@
     if(tabs)tabs.innerHTML=Object.entries(titles).map(([id,title])=>`<button type="button" data-act="tab" data-tab="${id}" class="${tab===id?'active':''}">${title}</button>`).join('');
     const html=({home:homeMarkup,timeline:timelineMarkup,people:peopleMarkup,knowledge:knowledgeMarkup,conflicts:issuesMarkup,
       search:searchMarkup,remind:reminderMarkup,settings:settingsMarkup})[tab]();
-    content.innerHTML=(ui.edit?editingMarkup():html)+(ui.previewSource?sourceMarkup():'');
+    // Source view replaces the list. Previously it was appended after a long list and invisible on mobile Safari.
+    content.innerHTML=ui.previewSource?sourceMarkup():(ui.edit?editingMarkup():html);
     updateStatus();scheduleHighlight();
   }
   async function clip(text){
@@ -1159,8 +1161,8 @@
     if(act==='latest'){sendBridge('latest');return;}
     if(act==='analyze'){analyzePending();return;}
     if(act==='stop'){stopAll();return;}
-    if(act==='source'){ui.previewSource=id;render();return;}
-    if(act==='close-source'){ui.previewSource=null;render();return;}
+    if(act==='source'){ui.previewSource=id;render();content.scrollTop=0;return;}
+    if(act==='close-source'){ui.previewSource=null;render();content.scrollTop=0;return;}
     if(act==='jump'){jumpToSource(id);return;}
     if(act==='copy-source'){const src=findSource(id);if(src)clip(src.text);return;}
     if(act==='edit'){ui.edit={kind,id};ui.previewSource=null;render();return;}
