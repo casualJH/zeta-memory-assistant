@@ -805,7 +805,7 @@
   function memoryArr(kind){return kind==='timeline'?roomData?.memory.timeline:
     kind==='characters'?roomData?.memory.characters:kind==='relations'?roomData?.memory.relations:
     kind==='clues'?roomData?.memory.clues:kind==='facts'?roomData?.memory.facts:
-    kind==='knowledge'?roomData?.memory.knowledge:kind==='issues'?roomData?.memory.issues:null;}
+    kind==='knowledge'?roomData?.memory.knowledge:kind==='emotions'?roomData?.memory.emotions:kind==='issues'?roomData?.memory.issues:null;}
   function safeUiItem(kind,id){return memoryArr(kind)?.find(x=>x.id===id)||null;}
   function cardHeading(title,subtitle=''){return `<h3>${esc(title)}</h3>${subtitle?`<p class="zmm-muted">${esc(subtitle)}</p>`:''}`;}
   function homeMarkup(){
@@ -829,18 +829,30 @@
       <div class="zmm-info">API 호출 ${usage.calls||0}회 · 전체 토큰 ${((usage.input||0)+(usage.output||0)+(usage.thinking||0)).toLocaleString()}개</div>`;
   }
   function timelineMarkup(){
-    const list=roomData?.memory.timeline||[];
-    const grouping=new Map();
+    const list=orderedTimeline(),grouping=new Map();
     for(const item of list){const label=item.label||'날짜 불명';if(!grouping.has(label))grouping.set(label,[]);grouping.get(label).push(item);}
-    const blocks=[...grouping].map(([label,items])=>`<section class="zmm-day"><h3>${esc(label)}</h3>${fmtRows(items,'timeline',x=>esc(x.description))}</section>`);
-    return cardHeading('서사 타임라인','작품 내 날짜가 우선이며, 실제 채팅 전송 시각은 서사 날짜로 사용하지 않습니다.')+(blocks.join('')||'<div class="zmm-empty">아직 서사 기록이 없습니다.</div>');
+    const blocks=[...grouping].map(([label,items])=>`<section class="zmm-day"><h3>${esc(label)}</h3>${fmtRows(items,'timeline',x=>`${x.timeType==='past'?'<span class="zmm-pill">과거 사건</span>':''}<p>${esc(x.description)}</p>`)}</section>`);
+    const state=roomData?.memory?.currentState;
+    const snapshot=state?.summary?`<section class="zmm-item"><h4>현재 장면</h4>
+      ${state.location?`<p>장소: ${esc(state.location)}</p>`:''}
+      ${state.people?`<p>인물: ${esc(state.people)}</p>`:''}
+      <p>${esc(state.summary)}</p>${state.conflict?`<p>진행 중인 갈등: ${esc(state.conflict)}</p>`:''}
+      ${sourceButtons(state.sourceIds)}</section>`:'';
+    return cardHeading('서사 타임라인','원문 근거의 순서와 확정된 이야기 날짜를 기준으로 정렬합니다. 회상은 과거 사건으로 표시합니다.')+
+      snapshot+(blocks.join('')||'<div class="zmm-empty">아직 서사 기록이 없습니다.</div>');
   }
   function peopleMarkup(){
     const m=roomData?.memory;
-    return cardHeading('인물별 기억', '기존 정보와 모순되지 않는 범위에서 자동 갱신합니다. 사용자가 수정한 값은 AI가 덮어쓰지 않습니다.')+
+    return cardHeading('인물별 기억','지속 감정과 현재 관계를 구분합니다. 수동 편집한 정보는 보호됩니다.')+
       '<h4>인물 카드</h4>'+fmtRows(m?.characters||[],'characters',x=>`<strong>${esc(x.name)}</strong>
-        ${x.traits?`<p>성격·설정: ${esc(x.traits)}</p>`:''}${x.family?`<p>가족: ${esc(x.family)}</p>`:''}${x.secrets?`<p>비밀: ${esc(x.secrets)}</p>`:''}`)+
-      '<h4>관계 변화</h4>'+fmtRows(m?.relations||[],'relations',x=>`<strong>${esc(x.a)} ↔ ${esc(x.b)}</strong><p>${esc(x.status)}</p>
+        ${x.traits?`<p>성격·설정: ${esc(x.traits)}</p>`:''}
+        ${x.family&&x.family!=='null'?`<p>가족: ${esc(x.family)}</p>`:''}
+        ${x.secrets&&x.secrets!=='null'?`<p>비밀: ${esc(x.secrets)}</p>`:''}`)+
+      '<h4>현재 감정선</h4>'+fmtRows(m?.emotions||[],'emotions',x=>`<strong>${esc(x.person)} → ${esc(x.target)}</strong><p>${esc(x.feeling)}</p>
+        ${x.reason?`<p>이유: ${esc(x.reason)}</p>`:''}
+        ${x.behavior?`<p>현재 행동: ${esc(x.behavior)}</p>`:''}
+        <span class="zmm-muted">${x.certainty==='inferred'?'행동 근거 해석':'명시된 감정'}</span>`)+
+      '<h4>현재 관계 구조</h4>'+fmtRows(m?.relations||[],'relations',x=>`<strong>${esc(x.a)} ↔ ${esc(x.b)}</strong><p>${esc(x.status)}</p>
         ${x.history?.length>1?`<span class="zmm-muted">관계 변화 기록 ${x.history.length}건</span>`:''}`);
   }
   function knowledgeMarkup(){
@@ -880,13 +892,16 @@
     let parts=['[과거 서사 상기]','이 자료는 실제 대화 및 사용자가 직접 지정한 설정을 바탕으로 한 참고 기록입니다. 기록에 없는 사건·대사·설정을 추가하지 마세요.'];
     if(m.pinnedText.trim())parts.push('\n■ 사용자 고정 지침\n'+m.pinnedText.trim());
     if(critical.length)parts.push('\n■ 확정·핵심 설정\n'+critical.map(f=>'- '+f.text).join('\n'));
-    const eligible=mode==='brief'?m.timeline.filter(x=>x.importance!=='low'):m.timeline;
+    const chronicle=orderedTimeline();
+    const eligible=mode==='brief'?chronicle.filter(x=>x.importance!=='low'):chronicle;
     const timeline=eligible.length<=maxEvents?eligible:
       [...eligible.slice(0,Math.floor(maxEvents/5)),...eligible.slice(-Math.ceil(maxEvents*4/5))];
     if(timeline.length){
       const byDay=new Map();for(const ev of timeline){if(!byDay.has(ev.label))byDay.set(ev.label,[]);byDay.get(ev.label).push(ev.description);}
       parts.push('\n■ 날짜별 서사\n'+[...byDay].map(([label,events])=>`${label}\n${events.map(x=>'- '+x).join('\n')}`).join('\n\n'));
     }
+    if(m.currentState?.summary)parts.push('\n■ 현재 진행 중인 장면\n'+m.currentState.summary);
+    if(m.emotions.length)parts.push('\n■ 현재 감정선\n'+m.emotions.map(e=>`- ${e.person} → ${e.target}: ${e.feeling} / 이유: ${e.reason} / 행동: ${e.behavior}`).join('\n'));
     if(m.characters.length)parts.push('\n■ 인물별 기억\n'+m.characters.map(c=>`- ${c.name}: ${[c.traits,c.family&&'가족: '+c.family,mode!=='brief'&&c.secrets&&'비밀: '+c.secrets].filter(Boolean).join(' / ')}`).join('\n'));
     if(m.relations.length)parts.push('\n■ 현재 인물 관계\n'+m.relations.map(r=>`- ${r.a} ↔ ${r.b}: ${r.status}`).join('\n'));
     const open=m.clues.filter(x=>x.status!=='solved');
@@ -975,10 +990,11 @@
   function editingMarkup(){
     const item=safeUiItem(ui.edit?.kind,ui.edit?.id);
     if(!item)return '';
-    const kinds={timeline:'서사 사건',characters:'인물 카드',relations:'인물 관계',clues:'복선',facts:'설정',knowledge:'지식 상태',issues:'모순'};
+    const kinds={timeline:'서사 사건',characters:'인물 카드',relations:'인물 관계',emotions:'현재 감정선',clues:'복선',facts:'설정',knowledge:'지식 상태',issues:'모순'};
     const fields={timeline:[['label','서사 날짜'],['description','사건 내용']],
       characters:[['name','이름'],['traits','성격·설정'],['family','가족'],['secrets','비밀']],
       relations:[['a','인물 A'],['b','인물 B'],['status','현재 관계']],
+      emotions:[['person','감정 주체'],['target','대상 인물'],['feeling','현재 감정'],['reason','형성 원인'],['behavior','행동 패턴']],
       clues:[['title','사건명'],['detail','세부 내용'],['status','상태(open/solved/hold)']],
       facts:[['tag','항목'],['text','확정 내용']],
       knowledge:[['character','인물명'],['text','알고 있거나 모르는 사실'],['status','상태(knows/unknown/partial)']],
@@ -1040,6 +1056,8 @@
     for(const r of roomData.memory.relations)push(`${r.a} ↔ ${r.b}`,r.status,r.sourceIds);
     for(const clue of roomData.memory.clues)push(clue.title,clue.detail,clue.sourceIds);
     for(const k of roomData.memory.knowledge)push(k.character,k.text,k.sourceIds);
+    for(const e of roomData.memory.emotions)push(e.person+' → '+e.target,e.feeling+' '+e.reason+' '+e.behavior,e.sourceIds);
+    if(roomData.memory.currentState)push('현재 장면',roomData.memory.currentState.summary,roomData.memory.currentState.sourceIds);
     for(const m of orderedMessages())push(m.speaker,m.text,[m.id]);
     results.sort((a,b)=>b.score-a.score);
     return results.slice(0,45);
@@ -1104,9 +1122,10 @@
     analysisStop=true;
     const previous=roomData.memory,next=defaultMemory();
     if(!eraseManual){
-      for(const key of ['timeline','characters','relations','clues','facts','issues','knowledge'])
+      for(const key of ['timeline','characters','relations','clues','facts','issues','knowledge','emotions'])
         next[key]=safeArray(previous[key]).filter(x=>x.manual);
       next.pinnedText=previous.pinnedText;
+      if(previous.currentState?.manual)next.currentState=previous.currentState;
     }
     roomData.memory=next;
     await saveRoom();
