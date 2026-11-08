@@ -1387,9 +1387,9 @@
     if(!confirm(list.length+'개 사건을 하나의 에피소드로 합칠까요? 원문 연결과 모든 사건 내용은 유지됩니다.'))return;
     const first=list[0],remove=new Set(list.slice(1).map(x=>x.id));
     first.description=joinEpisodeDescriptions(list.map(x=>x.description));
-    first.sourceIds=[...new Set(list.flatMap(x=>safeArray(x.sourceIds)))].sort((x,y)=>{
-      const index=sourceIndexMap();return (index.get(x)??Number.MAX_SAFE_INTEGER)-(index.get(y)??Number.MAX_SAFE_INTEGER);
-    });
+    const sourceOrder=sourceIndexMap();
+    first.sourceIds=[...new Set(list.flatMap(x=>safeArray(x.sourceIds)))].sort((x,y)=>
+      (sourceOrder.get(x)??Number.MAX_SAFE_INTEGER)-(sourceOrder.get(y)??Number.MAX_SAFE_INTEGER));
     first.importance=list.some(x=>x.importance==='critical')?'critical':list.some(x=>x.importance==='high')?'high':first.importance;
     first.manual=true;first.episodeKey='manual-merged-'+first.id;
     roomData.memory.timeline=roomData.memory.timeline.filter(x=>!remove.has(x.id));
