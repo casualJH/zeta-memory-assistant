@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         제타 AI 기억력 보조 (서사·모순·상기)
 // @namespace    zeta-memory-assistant
-// @version      0.1.1
+// @version      0.1.2
 // @description  과거 대화 로컬 보관, Gemini 서사 기억, 모순 의심 표시, 정정·상기 복사, 기억 검색
 // @updateURL    https://raw.githubusercontent.com/casualJH/zeta-memory-assistant/main/zeta-memory-assistant.user.js
 // @downloadURL  https://raw.githubusercontent.com/casualJH/zeta-memory-assistant/main/zeta-memory-assistant.user.js
@@ -30,7 +30,7 @@
   'use strict';
   if (window.__zetaMemoryAssistantV1) return;
   window.__zetaMemoryAssistantV1 = true;
-  const VERSION = '0.1.1';
+  const VERSION = '0.1.2';
   const DB_NAME = 'zeta-memory-assistant-db-v1';
   const UUID = /^[0-9a-f]{8}-(?:[0-9a-f]{4}-){3}[0-9a-f]{12}$/i;
   const CHANNEL = 'zmm-' + Array.from(crypto.getRandomValues(new Uint8Array(12)), n => n.toString(16).padStart(2, '0')).join('');
@@ -727,14 +727,30 @@
           conflict:normalizedInfo(state.conflict,700),sourceIds:sources,manual:false};changed++;}
       }
     }
+    // Reject roleplay disagreements, deception and emotional conflict. This detects
+    // only a documented contradiction between earlier established facts and later AI narration.
+    const messageOrder=sourceIndexMap();
+    const factualTypes=new Set(['place','appearance','relationship','history','speech','knowledge','timeline','world']);
     for(const issue of safeArray(delta.issues).slice(0,15)){
-      const sourceIds=sanitizeSources(issue?.sourceIds,allowed);if(!sourceIds.length)continue;
-      const quote=ensureShort(issue.quote,350),reason=ensureShort(issue.reason,700),correction=ensureShort(issue.correction,700);
-      if(!reason||!quote||!sourceIds.some(id=>idMap.get(id)?.role==='character'&&idMap.get(id)?.text.includes(quote)))continue;
-      if(mem.issues.some(x=>x.quote===quote&&x.reason===reason))continue;
-      // Evidence may refer to earlier collected messages, including previous source IDs.
-      const earlier=safeArray(issue.evidenceIds).map(String).filter(id=>msgMap.has(activeRoom+'|'+id)).slice(0,8);
-      mem.issues.push({id:newId('issue'),quote,reason,correction,sourceIds,evidenceIds:earlier,status:'open',manual:false});changed++;
+      const sourceIds=sanitizeSources(issue?.sourceIds,allowed);
+      const quote=ensureShort(issue?.quote,350),reason=ensureShort(issue?.reason,700),
+        correction=ensureShort(issue?.correction,700);
+      const evidenceQuote=ensureShort(issue?.evidenceQuote,350);
+      const type=String(issue?.errorType||'').trim().toLowerCase();
+      if(issue?.statementType!=='narration'||!factualTypes.has(type)||!quote||!reason||!evidenceQuote)continue;
+      const newest=sourceIds.filter(id=>idMap.get(id)?.role==='character'&&idMap.get(id)?.text.includes(quote));
+      if(!newest.length)continue;
+      const latestIndex=Math.min(...newest.map(id=>messageOrder.get(id)??Number.MAX_SAFE_INTEGER));
+      if(latestIndex===Number.MAX_SAFE_INTEGER)continue;
+      const older=safeArray(issue.evidenceIds).map(String).filter(id=>{
+        const m=findSource(id),index=messageOrder.get(id);
+        return m&&Number.isFinite(index)&&index<latestIndex&&
+          !excludedFromAnalysis({rows:[m]})&&m.text.includes(evidenceQuote);
+      }).slice(0,8);
+      if(!older.length)continue;
+      if(mem.issues.some(x=>x.quote===quote&&safeArray(x.sourceIds).some(id=>newest.includes(id))))continue;
+      mem.issues.push({id:newId('issue'),quote,reason,correction,evidenceQuote,errorType:type,
+        sourceIds:newest,evidenceIds:older,status:'open',manual:false});changed++;
     }
     mem.updatedAt=Date.now();
     return changed;
@@ -753,8 +769,8 @@
   }
   function analysisPrompt(rows){
     const payload=rows.map((m,i)=>({id:m.id,order:i,speaker:m.speaker,role:m.role,kind:m.kind,text:m.text.slice(0,18000)}));
-    const guidance="역할: RP 기록 보관자. 다음 대화가 정확히 이어질 수 있도록 원문 기반 서사를 보존한다. 요약 길이를 맞추려 디테일을 삭제하지 말고 원문에 없는 사건·대사·심리를 만들지 않는다.\n\n사건: 타임라인의 한 항목은 한 문장이나 한 동작이 아니라 한 장면의 완결된 사건 흐름(에피소드)이다. 대화 한두 줄, 몸짓, 감정 표현, 인물 등장, 장소 이동을 각각 독립 사건으로 작성하지 마라. 같은 목표·상황·갈등을 중심으로 이어진 행동→상대 반응→추가 행동→결과를 가능한 한 하나의 충분히 상세한 사건 문단으로 묶는다. 같은 장면의 작은 반응은 사건 설명 속에 포함한다. 독립된 새 갈등이 시작되거나 중요한 약속·결정·관계 전환 또는 결과가 확정될 때만 별도 항목으로 나눈다. 사건 하나에는 충분한 원문 근거와 인물별 행동·대사·변화 과정을 여러 문장으로 기록하며, 'A는 도발적이다'와 같은 성격·상태만을 사건으로 만들지 않는다. 사건 수를 늘리는 것이 아니라 실제 전개를 누락 없이 보존하는 것이 목표다. 한 날짜에 수십 개의 사소한 항목을 생성하지 말고 의미 있는 에피소드 중심으로 기록한다.\n\n순서: 입력 원문의 order는 채팅 출력 순서이지 세계관 날짜가 아니다. events를 사건 근거의 순서대로 반환하고, 한 원문에 여러 사건이 있으면 orderInSource를 0,1,2...로 표시한다. sourceIds에 해당 사건의 정확한 메시지 ID를 적는다. 나중에 밝혀진 과거 사건은 timeType=past로, 현재 사건은 present로 명시한다. 과거 사실이 지금 공개된 일 자체도 중요하면 현재의 공개 사건을 따로 기록한다.\n\n날짜: 실제 채팅 작성 날짜를 이야기 날짜로 쓰지 않는다. 사건 근거에 연월일이 명시되었을 때만 absoluteDate=YYYY-MM-DD, 아니면 null. 다음 날·사흘 뒤 같은 명백한 시간 경과의 첫 사건에만 advanceDays를 사용한다. 위젯·상태창은 참고하지만 본문과 충돌하면 본문 우선. 일시적 속마음이나 계획을 실행된 일로 기록하지 않는다. 모르면 불명으로 남긴다.\n\n감정: 지속적으로 행동에 영향을 미치는 감정을 emotions에서 인물→대상 방향으로 적고 종류·강도·원인·행동 패턴을 보존한다. 일시적 감정이나 해결된 감정은 현재 감정선에 넣지 않는다. 명시적 감정은 explicit, 반복 행동에 근거한 해석은 inferred, 근거가 불충분하면 기록하지 않는다. 보호심이나 끌림을 사랑으로 확대하지 않는다.\n\n관계: relations의 status는 현재 관계 단계와 애정·신뢰 방식, 갈등 해결 방식, 거리감, 주도권, 상호 인식 차이를 가능한 한 구체적으로 포함한다. 지속 중인 관계와 이미 해소된 과거 상태를 구분하고, 최신 확정 변화만 반영한다.\n\n현재 장면: currentState는 이번 입력의 가장 마지막으로 진행된 실제 장면이다. 장소·등장 인물·진행 중 갈등·마지막 상황을 구체적으로 적는다. 이 묶음의 마지막을 전체 스토리의 마지막이라고 단정하지 않는다.\n\n미해결: clues에 진행 중인 갈등, 미이행 약속·합의·조건·일정·복선의 현재 영향 및 위험을 보존한다. 완료·취소된 약속을 현재 유효한 것으로 기록하지 않는다. knowledge에서 누가 무엇을 알고 모르는지 구분한다. 미확인 내면·미래 사건을 확정하지 않는다.\n\n대사와 근거: 고백·협박·약속·선언·관계가 변한 대사는 실제 원문에 있는 표현만 큰따옴표로 인용한다. 의역은 따옴표 없이 간접 서술한다. OOC는 작품 사건이 아니다. 모순 issues는 최신 캐릭터 지문에 실재하는 연속 문자열을 quote로 제시하며 거짓말·반전·오해를 무조건 모순으로 단정하지 않는다.\n\n출력: 글자 수·사건 수 할당량이 없다. 누락을 줄이기 위해 모든 원문 메시지를 확인하되 사건을 억지로 늘리지 않는다. 응답은 코드 블록 없이 JSON 객체 하나. 원문이 없는 항목은 빈 배열, 미상 가족·비밀은 빈 문자열. sourceIds는 실제 제공된 row ID만 사용한다.";
-    const format="{\"events\":[{\"description\":\"배경·행동·반응·결과·영향\",\"timeType\":\"present\",\"orderInSource\":0,\"advanceDays\":0,\"absoluteDate\":null,\"sourceIds\":[\"원문 ID\"],\"importance\":\"normal\"}],\"currentState\":{\"summary\":\"입력 마지막 실제 장면\",\"location\":\"\",\"people\":\"\",\"conflict\":\"\",\"sourceIds\":[\"원문 ID\"]},\"emotions\":[{\"person\":\"\",\"target\":\"\",\"feeling\":\"\",\"reason\":\"\",\"behavior\":\"\",\"certainty\":\"explicit\",\"sourceIds\":[\"원문 ID\"]}],\"facts\":[{\"text\":\"\",\"tag\":\"설정\",\"sourceIds\":[\"원문 ID\"],\"importance\":\"high\"}],\"characters\":[{\"name\":\"\",\"traits\":\"\",\"family\":\"\",\"secrets\":\"\",\"sourceIds\":[\"원문 ID\"]}],\"relations\":[{\"a\":\"\",\"b\":\"\",\"status\":\"현재 관계 유지 방식\",\"sourceIds\":[\"원문 ID\"]}],\"clues\":[{\"title\":\"\",\"detail\":\"현재 영향·미이행 조건\",\"status\":\"open\",\"sourceIds\":[\"원문 ID\"]}],\"knowledge\":[{\"character\":\"\",\"text\":\"\",\"status\":\"knows\",\"sourceIds\":[\"원문 ID\"]}],\"issues\":[{\"quote\":\"실제 최신 지문\",\"reason\":\"\",\"correction\":\"\",\"sourceIds\":[\"최신 원문 ID\"],\"evidenceIds\":[\"과거 원문 ID\"]}]}";
+    const guidance="역할: RP 기록 보관자. 다음 대화가 정확히 이어질 수 있도록 원문 기반 서사를 보존한다. 요약 길이를 맞추려 디테일을 삭제하지 말고 원문에 없는 사건·대사·심리를 만들지 않는다.\n\n사건: 타임라인의 한 항목은 한 문장이나 한 동작이 아니라 한 장면의 완결된 사건 흐름(에피소드)이다. 대화 한두 줄, 몸짓, 감정 표현, 인물 등장, 장소 이동을 각각 독립 사건으로 작성하지 마라. 같은 목표·상황·갈등을 중심으로 이어진 행동→상대 반응→추가 행동→결과를 가능한 한 하나의 충분히 상세한 사건 문단으로 묶는다. 같은 장면의 작은 반응은 사건 설명 속에 포함한다. 독립된 새 갈등이 시작되거나 중요한 약속·결정·관계 전환 또는 결과가 확정될 때만 별도 항목으로 나눈다. 사건 하나에는 충분한 원문 근거와 인물별 행동·대사·변화 과정을 여러 문장으로 기록하며, 'A는 도발적이다'와 같은 성격·상태만을 사건으로 만들지 않는다. 사건 수를 늘리는 것이 아니라 실제 전개를 누락 없이 보존하는 것이 목표다. 한 날짜에 수십 개의 사소한 항목을 생성하지 말고 의미 있는 에피소드 중심으로 기록한다.\n\n순서: 입력 원문의 order는 채팅 출력 순서이지 세계관 날짜가 아니다. events를 사건 근거의 순서대로 반환하고, 한 원문에 여러 사건이 있으면 orderInSource를 0,1,2...로 표시한다. sourceIds에 해당 사건의 정확한 메시지 ID를 적는다. 나중에 밝혀진 과거 사건은 timeType=past로, 현재 사건은 present로 명시한다. 과거 사실이 지금 공개된 일 자체도 중요하면 현재의 공개 사건을 따로 기록한다.\n\n날짜: 실제 채팅 작성 날짜를 이야기 날짜로 쓰지 않는다. 사건 근거에 연월일이 명시되었을 때만 absoluteDate=YYYY-MM-DD, 아니면 null. 다음 날·사흘 뒤 같은 명백한 시간 경과의 첫 사건에만 advanceDays를 사용한다. 위젯·상태창은 참고하지만 본문과 충돌하면 본문 우선. 일시적 속마음이나 계획을 실행된 일로 기록하지 않는다. 모르면 불명으로 남긴다.\n\n감정: 지속적으로 행동에 영향을 미치는 감정을 emotions에서 인물→대상 방향으로 적고 종류·강도·원인·행동 패턴을 보존한다. 일시적 감정이나 해결된 감정은 현재 감정선에 넣지 않는다. 명시적 감정은 explicit, 반복 행동에 근거한 해석은 inferred, 근거가 불충분하면 기록하지 않는다. 보호심이나 끌림을 사랑으로 확대하지 않는다.\n\n관계: relations의 status는 현재 관계 단계와 애정·신뢰 방식, 갈등 해결 방식, 거리감, 주도권, 상호 인식 차이를 가능한 한 구체적으로 포함한다. 지속 중인 관계와 이미 해소된 과거 상태를 구분하고, 최신 확정 변화만 반영한다.\n\n현재 장면: currentState는 이번 입력의 가장 마지막으로 진행된 실제 장면이다. 장소·등장 인물·진행 중 갈등·마지막 상황을 구체적으로 적는다. 이 묶음의 마지막을 전체 스토리의 마지막이라고 단정하지 않는다.\n\n미해결: clues에 진행 중인 갈등, 미이행 약속·합의·조건·일정·복선의 현재 영향 및 위험을 보존한다. 완료·취소된 약속을 현재 유효한 것으로 기록하지 않는다. knowledge에서 누가 무엇을 알고 모르는지 구분한다. 미확인 내면·미래 사건을 확정하지 않는다.\n\n대사와 근거: 고백·협박·약속·선언·관계가 변한 대사는 실제 원문에 있는 표현만 큰따옴표로 인용한다. 의역은 따옴표 없이 간접 서술한다.  OOC는 작품 사건이 아니다. 모순 issues는 제타 AI의 서사 기억 오류만 감지한다. 과거에 확정된 장소 위치·외모·이력·관계·호칭·기본 말투·과거 사건·지식·세계관 사실을 AI가 이후 객관적 지문에서 다르게 서술한 경우만 보고한다. 캐릭터의 거짓말·변명·주관적인 대사·감정과 행동 불일치·논쟁·질투·독점욕·플러팅·반박·상대의 주장을 부정하는 말은 절대로 모순으로 취급하지 않는다. 최신 내용이 인물의 발언이면 모순 후보에서 제외한다. 확정된 설정이 실제 전개에서 변경되었다면 모순이 아니다. 과거 근거의 정확한 원문 연속 부분 문자열 evidenceQuote와 과거 원문 ID evidenceIds, 충돌하는 최신 AI 객관적 서술의 정확한 연속 부분 문자열 quote와 최신 원문 ID sourceIds를 모두 제공한다. 반드시 statementType=narration, errorType=place/appearance/relationship/history/speech/knowledge/timeline/world 중 하나로 작성하고 명확한 충돌 근거가 없으면 issues=[]로 둔다.\n\n출력: 글자 수·사건 수 할당량이 없다. 누락을 줄이기 위해 모든 원문 메시지를 확인하되 사건을 억지로 늘리지 않는다. 응답은 코드 블록 없이 JSON 객체 하나. 원문이 없는 항목은 빈 배열, 미상 가족·비밀은 빈 문자열. sourceIds는 실제 제공된 row ID만 사용한다.";
+    const format="{\"events\":[{\"description\":\"배경·행동·반응·결과·영향\",\"timeType\":\"present\",\"orderInSource\":0,\"advanceDays\":0,\"absoluteDate\":null,\"sourceIds\":[\"원문 ID\"],\"importance\":\"normal\"}],\"currentState\":{\"summary\":\"입력 마지막 실제 장면\",\"location\":\"\",\"people\":\"\",\"conflict\":\"\",\"sourceIds\":[\"원문 ID\"]},\"emotions\":[{\"person\":\"\",\"target\":\"\",\"feeling\":\"\",\"reason\":\"\",\"behavior\":\"\",\"certainty\":\"explicit\",\"sourceIds\":[\"원문 ID\"]}],\"facts\":[{\"text\":\"\",\"tag\":\"설정\",\"sourceIds\":[\"원문 ID\"],\"importance\":\"high\"}],\"characters\":[{\"name\":\"\",\"traits\":\"\",\"family\":\"\",\"secrets\":\"\",\"sourceIds\":[\"원문 ID\"]}],\"relations\":[{\"a\":\"\",\"b\":\"\",\"status\":\"현재 관계 유지 방식\",\"sourceIds\":[\"원문 ID\"]}],\"clues\":[{\"title\":\"\",\"detail\":\"현재 영향·미이행 조건\",\"status\":\"open\",\"sourceIds\":[\"원문 ID\"]}],\"knowledge\":[{\"character\":\"\",\"text\":\"\",\"status\":\"knows\",\"sourceIds\":[\"원문 ID\"]}],\"issues\":[{\"quote\":\"AI 객관적 서술 그대로\",\"reason\":\"과거 확정 사실과 다른 점\",\"correction\":\"기존 설정에 부합하는 정정\",\"statementType\":\"narration\",\"errorType\":\"place\",\"evidenceQuote\":\"이전 원문의 정확한 근거 문구\",\"sourceIds\":[\"최신 원문 ID\"],\"evidenceIds\":[\"과거 원문 ID\"]}]}";
     return guidance+'\n\nJSON 예시 형식: '+format+
       '\n\n[기존 누적 기억 — 맥락 참고용, 과거 사건을 중복 생성하지 말 것]\n'+memoryContext()+
       '\n\n[이번 입력의 전체 대화 원문 — 빠짐없이 확인]\n'+JSON.stringify(payload);
@@ -907,7 +923,7 @@
     const m=roomData?.memory;if(!m)return '';
     const critical=m.facts.filter(f=>f.importance==='critical'||f.manual),important=m.facts.filter(f=>f.importance==='high');
     const maxEvents=mode==='brief'?25:mode==='normal'?120:10000;
-    const maxChars=mode==='brief'?2800:mode==='normal'?8000:28000; // Only copied reminder text is capped; stored memories are not.
+    const maxChars=mode==='brief'?2800:4500; // Copied output capped at 4,500; saved memory unchanged.
     let parts=['[과거 서사 상기]','이 자료는 실제 대화 및 사용자가 직접 지정한 설정을 바탕으로 한 참고 기록입니다. 기록에 없는 사건·대사·설정을 추가하지 마세요.'];
     if(m.pinnedText.trim())parts.push('\n■ 사용자 고정 지침\n'+m.pinnedText.trim());
     if(critical.length)parts.push('\n■ 확정·핵심 설정\n'+critical.map(f=>'- '+f.text).join('\n'));
@@ -948,10 +964,10 @@
       <label>상기 분량 <select id="zmm-summary-length" data-field="summaryLength">
         <option value="brief" ${ui.summaryLength==='brief'?'selected':''}>간략 · 핵심 사건</option>
         <option value="normal" ${ui.summaryLength==='normal'?'selected':''}>표준 · 날짜별 서사와 관계</option>
-        <option value="detailed" ${ui.summaryLength==='detailed'?'selected':''}>상세 · 모든 기억 최대한 포함</option>
+        <option value="detailed" ${ui.summaryLength==='detailed'?'selected':''}>상세 · 4,500자 이내</option>
       </select></label>
       <div class="zmm-row"><button class="zmm-main" data-act="copy-reminder">전체 서사 상기 복사</button><button data-act="preview-reminder">미리보기</button></div>
-      <p class="zmm-muted">기존 기록을 바탕으로 즉시 생성하므로 복사 때마다 API 비용이 들지 않습니다. 저장된 기록 자체가 없는 부분은 생성하지 않습니다.</p>
+      <p class="zmm-muted">복사하는 상기문은 공백 포함 최대 4,500자입니다. 저장된 기억은 줄이지 않으며, 복사 때 API를 호출하지 않습니다.</p>
       ${ui.lastOutput?`<div class="zmm-output"><button data-act="copy-output">미리보기 내용 복사</button><pre>${esc(ui.lastOutput)}</pre></div>`:''}`;
   }
   function priceEstimate(){
@@ -1043,9 +1059,11 @@
   function render(){
     if(!content)return;
     if(!roomData&&tab!=='settings')tab='home';
-    const titles={home:'현황',timeline:'타임라인',people:'인물·관계',knowledge:'설정·복선',conflicts:'모순',search:'기억 검색',remind:'서사 상기',settings:'설정'};
+    const titles={home:'현황',timeline:'타임라인',people:'인물·관계',knowledge:'설정·복선',conflicts:'모순',search:'기억 검색',remind:'서사 상기'};
     const tabs=$('#zmm-tabs');
     if(tabs)tabs.innerHTML=Object.entries(titles).map(([id,title])=>`<button type="button" data-act="tab" data-tab="${id}" class="${tab===id?'active':''}">${title}</button>`).join('');
+    const settingsButton=$('#zmm-settings-button',panel);
+    if(settingsButton)settingsButton.classList.toggle('active',tab==='settings');
     const html=({home:homeMarkup,timeline:timelineMarkup,people:peopleMarkup,knowledge:knowledgeMarkup,conflicts:issuesMarkup,
       search:searchMarkup,remind:reminderMarkup,settings:settingsMarkup})[tab]();
     // Source view replaces the list. Previously it was appended after a long list and invisible on mobile Safari.
@@ -1179,7 +1197,7 @@
   }
   async function clickAction(button){
     const act=button.dataset.act,id=button.dataset.id,kind=button.dataset.kind;
-    if(act==='tab'){tab=button.dataset.tab;ui.edit=null;ui.previewSource=null;render();return;}
+    if(act==='tab'||act==='open-settings'){tab=act==='open-settings'?'settings':button.dataset.tab;ui.edit=null;ui.previewSource=null;render();content.scrollTop=0;return;}
     if(act==='close'){panel.hidden=true;return;}
     if(act==='diagnose'){sendBridge('identify');setStatus(`연결 재확인 · 브리지 ${bridgeReady?'정상':'대기'} · 인증 ${bridgeDiagnostics.authorization?'확인됨':'미확인'}. 채팅방 새로고침 후 다시 시도해 주세요.`);return;}
     if(act==='full'){sendBridge('full');return;}
@@ -1352,6 +1370,8 @@
       #zmm-panel .zmm-header{padding:10px 11px 6px;display:flex;align-items:center;gap:8px;cursor:grab;user-select:none}
       #zmm-panel .zmm-header button{flex:none;padding:5px 8px;min-height:27px}
       #zmm-panel .zmm-header strong{font-size:14px;flex:1}
+      #zmm-panel .zmm-header #zmm-settings-button{font-size:12px;padding:5px 8px}
+      #zmm-panel .zmm-header #zmm-settings-button.active{background:#565269;border-color:#aaa5b8}
       #zmm-panel #zmm-count{font-size:11px;color:#cac6d6;padding:0 11px 7px}
       #zmm-tabs{display:flex;gap:4px;overflow-x:auto;padding:4px 8px;scrollbar-width:thin;border-top:1px solid #383743;border-bottom:1px solid #383743;flex:none}
       #zmm-tabs button{flex:none;white-space:nowrap;padding:7px 9px;font-size:11px}
@@ -1398,7 +1418,7 @@
     (document.head||document.documentElement).append(style);
     pageButton=document.createElement('button');pageButton.id='zmm-launch';pageButton.type='button';pageButton.textContent='기억 보조';
     panel=document.createElement('section');panel.id='zmm-panel';panel.hidden=true;
-    panel.innerHTML=`<div class="zmm-header"><strong>제타 AI 기억력 보조</strong><span class="zmm-muted">↕</span><button data-act="close">닫기</button></div>
+    panel.innerHTML=`<div class="zmm-header"><strong>제타 AI 기억력 보조</strong><button type="button" id="zmm-settings-button" data-act="open-settings">설정</button><span class="zmm-muted" title="드래그하여 이동">↕</span><button data-act="close">닫기</button></div>
       <div id="zmm-count"></div><nav id="zmm-tabs"></nav><main id="zmm-content"></main><div id="zmm-status" role="status"></div>`;
     document.body.append(pageButton,panel);content=$('#zmm-content');note=$('#zmm-status');
     pageButton.addEventListener('click',e=>{
