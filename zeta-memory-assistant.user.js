@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         제타 AI 기억력 보조 (서사·모순·상기)
 // @namespace    zeta-memory-assistant
-// @version      0.1.0
+// @version      0.1.1
 // @description  과거 대화 로컬 보관, Gemini 서사 기억, 모순 의심 표시, 정정·상기 복사, 기억 검색
 // @updateURL    https://raw.githubusercontent.com/casualJH/zeta-memory-assistant/main/zeta-memory-assistant.user.js
 // @downloadURL  https://raw.githubusercontent.com/casualJH/zeta-memory-assistant/main/zeta-memory-assistant.user.js
@@ -30,7 +30,7 @@
   'use strict';
   if (window.__zetaMemoryAssistantV1) return;
   window.__zetaMemoryAssistantV1 = true;
-  const VERSION = '0.1.0';
+  const VERSION = '0.1.1';
   const DB_NAME = 'zeta-memory-assistant-db-v1';
   const UUID = /^[0-9a-f]{8}-(?:[0-9a-f]{4}-){3}[0-9a-f]{12}$/i;
   const CHANNEL = 'zmm-' + Array.from(crypto.getRandomValues(new Uint8Array(12)), n => n.toString(16).padStart(2, '0')).join('');
@@ -805,7 +805,7 @@
   function sourceButtons(ids){
     const arr=[...new Set(safeArray(ids).filter(id=>typeof id==='string'&&id))].slice(0,4);
     if(!arr.length)return '<span class="zmm-muted">출처 없음 · 수동 입력</span>';
-    return `<div class="zmm-sources">${arr.map((id,i)=>`<button type="button" class="zmm-tiny" data-act="source" data-id="${esc(id)}" title="출처 원문 ${i+1} 보기">원문 ${i+1}</button>`).join('')}</div>`;
+    return `<div class="zmm-sources" data-source-ids="${esc(JSON.stringify(arr))}">${arr.map((id,i)=>`<button type="button" class="zmm-tiny" data-act="source" data-id="${esc(id)}" title="연결된 원문 ${arr.length}개 모두 보기">원문 ${i+1}</button>`).join('')}</div>`;
   }
   function importanceSelect(kind,item){
     const labels={critical:'핵심',high:'중요',normal:'일반',low:'사소'};
@@ -830,7 +830,6 @@
     if(!roomData)return '<div class="zmm-empty">채팅방 ID를 아직 감지하지 못했습니다. 제타 채팅방에서 새로고침해 주세요.<div class="zmm-row"><button data-act="diagnose">연결 재확인</button></div><small>연결 방식: '+esc(bridgeDiagnostics.mode)+' · 인증 확인: '+(bridgeDiagnostics.authorization?'예':'아니요')+'</small></div>';
     const m=roomData.memory,processed=new Set(m.processedIds);
     const groups=messageGroups();
-    const excluded=groups.filter(excludedFromAnalysis).length;
     const pending=groups.filter(x=>!processed.has(x.id)&&!excludedFromAnalysis(x)).length;
     const usage=roomData.usage||{};
     return `${cardHeading('대화 및 기억 현황',`채팅방 ${activeRoom.slice(0,8)}… · ${roomData.fullyLoaded?'전체 수집 완료':'전체 대화 미확인'}`)}
@@ -843,7 +842,6 @@
       <div class="zmm-row"><button class="zmm-main" data-act="full">과거 대화 전체 불러오기</button><button data-act="latest">최신 대화 확인</button></div>
       <div class="zmm-row"><button class="zmm-main" data-act="analyze">${analysisBusy?'분석 중…':'미분석 대화 요약'}</button><button data-act="stop">중지</button></div>
       <p class="zmm-muted">최초 1회 전체 수집이 완료되어야 분석할 수 있습니다. 이후에는 추가된 턴만 분석합니다. 자동 분석이 켜져 있어도 API 키가 없으면 실행하지 않습니다.</p>
-      <p class="zmm-muted">분석 제외: ${excluded}턴 · 메시지에 'ooc:' 또는 '요약'이 포함되면 해당 메시지 전체를 Gemini 분석에서 제외합니다. 원문·JSON 백업에는 보존됩니다.</p>
       <label class="zmm-line"><span>새 대화 자동 분석</span><input id="zmm-auto-home" type="checkbox" data-field="auto" ${apiSettings.auto?'checked':''}></label>
       <div class="zmm-info">${esc(roomData.lastSync?'전체 수집 완료 시각(기기 기준): '+new Date(roomData.lastSync).toLocaleString('ko-KR'):'전체 수집 전입니다. 채팅방 새로고침 후 수집을 시작하세요.')}</div>
       <div class="zmm-row"><button data-act="tab" data-tab="conflicts">모순 정정</button><button data-act="tab" data-tab="remind">전체 서사 상기</button></div>
@@ -998,9 +996,9 @@
       '<p class="zmm-muted">무료 등급 선택됨 · 비용 추정은 표시하지 않습니다. 실제 사용 한도와 청구 여부는 Google AI Studio에서 확인해 주세요.</p>'}
       <div class="zmm-row"><button data-act="save-settings">설정 저장</button></div>
       <h4>백업 · 복원</h4>
-      <div class="zmm-row"><button data-act="backup">이 채팅방 JSON 백업</button><button data-act="import">JSON 복원</button></div>
+      <div class="zmm-row"><button data-act="backup">기억·요약 결과 백업</button><button data-act="import">기억·요약 결과 복원</button></div>
       <input id="zmm-file" type="file" accept=".json,application/json" hidden>
-      <p class="zmm-muted">복원 시 현재 채팅방 ID와 백업의 채팅방 ID가 같아야 하며, 이 채팅방의 기록을 대체합니다. 백업 파일에는 대화 원문이 포함됩니다.</p>
+      <p class="zmm-muted">백업에는 스크립트가 저장한 타임라인·인물·관계·감정선·설정·모순·분석 진행 기록과 수동 기억만 포함됩니다. 대화 원문·API 키는 포함되지 않습니다. 복원은 같은 채팅방의 기억만 대체하며 수집된 원문은 유지합니다. 이전 버전의 JSON 백업도 기억만 복원합니다.</p>
       <h4>분석 다시 시작</h4>
       <p class="zmm-muted">기존 요약을 초기화하고 원문 대화를 바탕으로 처음부터 재분석할 수 있습니다. 원문 대화는 삭제하지 않습니다.</p>
       <label class="zmm-line"><span>수동 편집·직접 추가한 기억·고정 지침도 함께 초기화</span>
@@ -1026,12 +1024,21 @@
       <p class="zmm-muted">수동 수정한 값은 이후 AI 분석에서 자동 덮어쓰지 않게 표시됩니다.</p></div>`;
   }
   function sourceMarkup(){
-    const msg=findSource(ui.previewSource);
-    if(!msg)return '<section class="zmm-archive"><h3>출처 원문</h3><p>원문을 찾지 못했습니다. 전체 대화 불러오기를 다시 실행해 주세요.</p><button data-act="close-source">목록으로 돌아가기</button></section>';
-    return `<section class="zmm-archive"><h3>출처 원문</h3><p class="zmm-muted">${esc(msg.speaker)} · ${esc(msg.kind==='info_box'?'상태창':'대화 지문')}</p>
-      <pre>${esc(msg.text)}</pre>
-      <div class="zmm-row"><button class="zmm-main" data-act="copy-source" data-id="${esc(msg.id)}">원문 복사</button><button data-act="close-source">목록으로 돌아가기</button></div>
-      <div class="zmm-row"><button data-act="jump" data-id="${esc(msg.id)}">채팅 말풍선으로 이동 (화면에 없으면 제한될 수 있음)</button></div></section>`;
+    const ids=[...new Set((Array.isArray(ui.previewSource)?ui.previewSource:[ui.previewSource])
+      .filter(id=>typeof id==='string'&&id))].slice(0,4);
+    const cards=ids.map((id,i)=>{
+      const msg=findSource(id);
+      if(!msg)return `<article class="zmm-item"><h4>원문 ${i+1}</h4>
+        <p class="zmm-muted">저장된 원문을 찾지 못했습니다. 과거 대화 전체 불러오기를 실행하면 다시 확인할 수 있습니다.</p></article>`;
+      return `<article class="zmm-item"><h4>원문 ${i+1} · ${esc(msg.speaker)}</h4>
+        <p class="zmm-muted">${esc(msg.kind==='info_box'?'상태창':'대화 지문')}</p>
+        <pre>${esc(msg.text)}</pre>
+        <div class="zmm-row"><button class="zmm-main" data-act="copy-source" data-id="${esc(msg.id)}">이 원문 복사</button>
+        <button data-act="jump" data-id="${esc(msg.id)}">말풍선 이동</button></div></article>`;
+    }).join('');
+    return `<section class="zmm-archive"><h3>연결된 원문 ${ids.length}개</h3>
+      <div class="zmm-row"><button class="zmm-main" data-act="close-source">기억 목록으로 돌아가기</button></div>
+      ${cards||'<p>연결된 원문이 없습니다.</p>'}</section>`;
   }
   function render(){
     if(!content)return;
@@ -1112,27 +1119,31 @@
   }
   async function backup(){
     if(!roomData)return setStatus('채팅방이 없습니다.');
-    const archive={format:'zeta-memory-assistant',version:VERSION,room:activeRoom,exportedAt:new Date().toISOString(),
-      roomData, messages:orderedMessages()};
+    // Only the script's memory/summary results are backed up. Raw dialogue stays in IndexedDB.
+    const archive={format:'zeta-memory-assistant',backupType:'memory-only',version:VERSION,
+      room:activeRoom,exportedAt:new Date().toISOString(),memory:roomData.memory};
     exportJSON(`zeta-memory-${activeRoom.slice(0,8)}.json`,archive);
-    setStatus(`JSON 백업 요청 · 원문 ${archive.messages.length}개 · API 키 제외`);
+    setStatus('기억·요약 결과 JSON 백업 요청 · 대화 원문 및 API 키 제외');
   }
   async function importFile(file){
     if(!file||file.size>60*1024*1024){setStatus('복원할 JSON 파일은 60MB 이하여야 합니다.');return;}
-    if(!activeRoom)return;
+    if(!activeRoom||!roomData)return setStatus('복원할 채팅방을 열어 주세요.');
+    if(analysisBusy||syncBusy)return setStatus('대화 수집 또는 분석이 완료된 뒤 기억을 복원해 주세요.');
     try{
       const data=JSON.parse(await file.text());
-      if(data.format!=='zeta-memory-assistant'||data.room!==activeRoom||!Array.isArray(data.messages))throw new Error('현재 채팅방과 백업의 ID가 다르거나 형식이 올바르지 않습니다.');
-      if(!confirm(`현재 채팅방의 원문 및 기억 기록을 백업으로 바꿉니다. 계속할까요?`))return;
-      const rows=data.messages.filter(r=>r&&r.room===activeRoom&&typeof r.id==='string'&&typeof r.text==='string'&&r.text.length<200000)
-        .map(r=>({...r,key:activeRoom+'|'+r.id}));
-      const incoming=data.roomData;
-      if(!incoming||incoming.room!==activeRoom)throw new Error('백업 기록의 채팅방 정보가 일치하지 않습니다.');
-      const restored={...defaultRoom(activeRoom),...incoming,room:activeRoom,memory:ensureMemory(incoming.memory)};
-      await dbReplaceRoomMessages(activeRoom,rows);await dbPut('rooms',restored);
-      roomData=restored;msgMap=new Map(rows.map(r=>[r.key,r]));
-      ui.previewSource=null;setStatus(`복원 완료 · 원문 ${rows.length}개`);render();
-    }catch(e){setStatus('JSON 복원 실패: '+String(e.message||e));}
+      if(data.format!=='zeta-memory-assistant'||data.room!==activeRoom)
+        throw new Error('현재 채팅방과 백업의 ID가 다르거나 백업 형식이 올바르지 않습니다.');
+      // Accept old backups, but restore only their saved memories without touching raw messages.
+      const incoming=data.backupType==='memory-only'?data.memory:data.roomData?.memory;
+      if(!incoming||typeof incoming!=='object'||!Array.isArray(incoming.timeline))
+        throw new Error('파일에 복원할 기억·요약 결과가 없습니다.');
+      if(!confirm('현재 채팅방의 기억·요약 결과를 백업 내용으로 대체할까요? 수집된 대화 원문은 유지됩니다.'))return;
+      roomData.memory=ensureMemory(incoming);
+      await saveRoom();
+      ui.previewSource=null;
+      setStatus('기억·요약 결과 복원 완료 · 대화 원문 유지 · 출처 확인은 로컬 수집 기록을 사용합니다.');
+      render();
+    }catch(e){setStatus('기억 복원 실패: '+String(e.message||e));}
   }
   async function resetAnalysis(){
     if(!roomData)return;
@@ -1175,7 +1186,14 @@
     if(act==='latest'){sendBridge('latest');return;}
     if(act==='analyze'){analyzePending();return;}
     if(act==='stop'){stopAll();return;}
-    if(act==='source'){ui.previewSource=id;render();content.scrollTop=0;return;}
+    if(act==='source'){
+      let ids=[id];
+      try{
+        const group=button.closest('.zmm-sources'),parsed=JSON.parse(group?.dataset.sourceIds||'null');
+        if(Array.isArray(parsed)&&parsed.length)ids=parsed.filter(x=>typeof x==='string'&&x).slice(0,4);
+      }catch{}
+      ui.previewSource=ids;render();content.scrollTop=0;return;
+    }
     if(act==='close-source'){ui.previewSource=null;render();content.scrollTop=0;return;}
     if(act==='jump'){jumpToSource(id);return;}
     if(act==='copy-source'){const src=findSource(id);if(src)clip(src.text);return;}
@@ -1368,6 +1386,7 @@
       #zmm-panel .zmm-editor{background:#292a35;border:1px solid #706e80;border-radius:10px;padding:10px}
       #zmm-panel .zmm-output,#zmm-panel .zmm-archive{border:1px solid #68667a;border-radius:9px;margin:12px 0;padding:10px;background:#282934}
       #zmm-panel pre{white-space:pre-wrap;word-break:break-word;font:12px/1.6 system-ui;max-height:380px;overflow:auto}
+      #zmm-panel .zmm-archive pre{max-height:none;overflow:visible}
       #zmm-status{padding:8px 11px;border-top:1px solid #444354;background:#2a2a34;color:#e8e3f0;
         font:11px/1.4 system-ui;white-space:pre-wrap;max-height:58px;overflow:auto;flex:none}
       .zmm-jump-target{outline:4px solid #65d49d!important;outline-offset:3px!important}
