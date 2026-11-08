@@ -1,5 +1,5 @@
 // ==UserScript==
-// @name         제타 AI 기억력 보조 (서사·모순·상기)
+// @name         제타 기억력 보조
 // @namespace    zeta-memory-assistant
 // @version      0.2.2
 // @description  과거 대화 로컬 보관, Gemini 서사 기억, 모순 의심 표시, 정정·상기 복사, 기억 검색
