@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         제타 AI 기억력 보조 (서사·모순·상기)
 // @namespace    zeta-memory-assistant
-// @version      0.2.0
+// @version      0.2.1
 // @description  과거 대화 로컬 보관, Gemini 서사 기억, 모순 의심 표시, 정정·상기 복사, 기억 검색
 // @updateURL    https://raw.githubusercontent.com/casualJH/zeta-memory-assistant/main/zeta-memory-assistant.user.js
 // @downloadURL  https://raw.githubusercontent.com/casualJH/zeta-memory-assistant/main/zeta-memory-assistant.user.js
@@ -30,7 +30,7 @@
   'use strict';
   if (window.__zetaMemoryAssistantV1) return;
   window.__zetaMemoryAssistantV1 = true;
-  const VERSION = '0.2.0';
+  const VERSION = '0.2.1';
   const DB_NAME = 'zeta-memory-assistant-db-v1';
   const UUID = /^[0-9a-f]{8}-(?:[0-9a-f]{4}-){3}[0-9a-f]{12}$/i;
   const CHANNEL = 'zmm-' + Array.from(crypto.getRandomValues(new Uint8Array(12)), n => n.toString(16).padStart(2, '0')).join('');
@@ -692,16 +692,19 @@
       const currentFirst=Math.min(Number.MAX_SAFE_INTEGER,...sourceIds.map(id=>allPositions.get(id)??Number.MAX_SAFE_INTEGER));
       const continuous=previousLast>=0&&currentFirst>=previousLast&&currentFirst-previousLast<=20;
       const sameEpisode=episodeKey&&previous?.episodeKey===episodeKey&&continuous;
+      const explicitContinuation=ev?.continuesPreviousEpisode===true&&continuous;
       const compatible=previous&&!previous.manual&&previous.label===label&&
-        previous.timeType===(historical?'past':'present');
-      // Only allow cross-chunk joining if Gemini reused a concrete episode key.
-      // When keys are absent, only a short, directly shared-source continuation can join.
-      const canJoin=compatible&&previous.description.length+description.length<6500&&
-        ((sameEpisode)||(sameSource&&description.length<260&&previous.description.length<1500))&&
-        previous.importance!=='critical'&&ev.importance!=='critical';
+        previous.timeType===(historical?'past':'present')&&advance===0;
+      // A single multi-message episode should remain one entry even when an
+      // analysis batch boundary splits its text. Keep manual edits untouched.
+      // Explicit continuation is allowed only for nearby chronological messages.
+      const canJoin=compatible&&previous.description.length+description.length<25000&&
+        (sameEpisode||explicitContinuation||
+          (sameSource&&description.length<400&&previous.description.length<3000));
       if(canJoin){
         previous.description=joinEpisodeDescriptions([previous.description,description]);
         previous.sourceIds=[...new Set([...previousSources,...sourceIds])];
+        if(!previous.episodeKey&&episodeKey)previous.episodeKey=episodeKey;
         previous.importance=previous.importance==='high'||ev.importance==='high'?'high':previous.importance;
         changed++;
         continue;
@@ -791,11 +794,25 @@
     let s=JSON.stringify(arr);if(s.length>25000){arr.events=arr.events.slice(-25);arr.knowledge=arr.knowledge.slice(-30);s=JSON.stringify(arr);}
     return s.slice(0,32000);
   }
+  function recentEpisodeContext(){
+    const latest=orderedTimeline().slice(-2);
+    if(!latest.length)return '저장된 이전 에피소드 없음. 새 장면부터 시작.';
+    const last=latest[latest.length-1];
+    const refs=safeArray(last.sourceIds).slice(-4);
+    return JSON.stringify({
+      lastEpisodes:latest.map(e=>({id:e.id,episodeKey:e.episodeKey||'',date:e.label,
+        type:e.timeType,description:String(e.description||'').slice(-2600),
+        sourceIds:safeArray(e.sourceIds).slice(-12)})),
+      lastSourceMessages:refs.map(id=>{const r=findSource(id);return r?{id,speaker:r.speaker,role:r.role,text:String(r.text).slice(-650)}:null;}).filter(Boolean),
+      instruction:'이전 에피소드의 같은 시간·장소·갈등이 입력에서 계속되면 새 사건을 만들지 말고 계속됨으로 표시. 관계나 등장인물이 같다는 이유만으로 독립 사건까지 합치지 말 것.'
+    });
+  }
   function analysisPrompt(rows){
     const payload=rows.map((m,i)=>({id:m.id,order:i,speaker:m.speaker,role:m.role,kind:m.kind,text:m.text.slice(0,18000)}));
-    const guidance="역할: RP 기록 보관자. 다음 대화가 정확히 이어질 수 있도록 원문 기반 서사를 보존한다. 요약 길이를 맞추려 디테일을 삭제하지 말고 원문에 없는 사건·대사·심리를 만들지 않는다.\n\n사건: 타임라인의 한 항목은 한 문장이나 한 동작이 아니라 한 장면의 완결된 사건 흐름(에피소드)이다. 대화 한두 줄, 몸짓, 감정 표현, 인물 등장, 장소 이동을 각각 독립 사건으로 작성하지 마라. 같은 목표·상황·갈등을 중심으로 이어진 행동→상대 반응→추가 행동→결과를 가능한 한 하나의 충분히 상세한 사건 문단으로 묶는다. 같은 장면의 작은 반응은 사건 설명 속에 포함한다. 독립된 새 갈등이 시작되거나 중요한 약속·결정·관계 전환 또는 결과가 확정될 때만 별도 항목으로 나눈다. 사건 하나에는 충분한 원문 근거와 인물별 행동·대사·변화 과정을 여러 문장으로 기록하며, 'A는 도발적이다'와 같은 성격·상태만을 사건으로 만들지 않는다. 동일한 장소·시간·갈등에서 이어지는 행동과 그 직접 결과는 서로 다른 메시지와 API 묶음에 걸쳐도 하나의 에피소드다. events의 episodeKey에는 같은 연속 장면에만 동일한 짧은 장면 식별자(예: 장소-핵심상황)를 넣는다. 새 장소·시점·독립 갈등이면 새 키를 사용한다. 이전 누적 사건의 마지막 장면이 이번 대화에서 그대로 이어졌다면 동일한 episodeKey를 재사용할 수 있다. 한 장면을 단문 사건 여러 개로 쪼개지 마라. 사건 수를 늘리는 것이 아니라 실제 전개를 누락 없이 보존하는 것이 목표다. 한 날짜에 수십 개의 사소한 항목을 생성하지 말고 의미 있는 에피소드 중심으로 기록한다.\n\n순서: 입력 원문의 order는 채팅 출력 순서이지 세계관 날짜가 아니다. events를 사건 근거의 순서대로 반환하고, 한 원문에 여러 사건이 있으면 orderInSource를 0,1,2...로 표시한다. sourceIds에 해당 사건의 정확한 메시지 ID를 적는다. 나중에 밝혀진 과거 사건은 timeType=past로, 현재 사건은 present로 명시한다. 과거 사실이 지금 공개된 일 자체도 중요하면 현재의 공개 사건을 따로 기록한다.\n\n날짜: 실제 채팅 작성 날짜를 이야기 날짜로 쓰지 않는다. 사건 근거에 연월일이 명시되었을 때만 absoluteDate=YYYY-MM-DD, 아니면 null. 다음 날·사흘 뒤 같은 명백한 시간 경과의 첫 사건에만 advanceDays를 사용한다. 위젯·상태창은 참고하지만 본문과 충돌하면 본문 우선. 일시적 속마음이나 계획을 실행된 일로 기록하지 않는다. 모르면 불명으로 남긴다.\n\n감정: 지속적으로 행동에 영향을 미치는 감정을 emotions에서 인물→대상 방향으로 적고 종류·강도·원인·행동 패턴을 보존한다. 일시적 감정이나 해결된 감정은 현재 감정선에 넣지 않는다. 명시적 감정은 explicit, 반복 행동에 근거한 해석은 inferred, 근거가 불충분하면 기록하지 않는다. 보호심이나 끌림을 사랑으로 확대하지 않는다.\n\n관계: relations의 status는 현재 관계 단계와 애정·신뢰 방식, 갈등 해결 방식, 거리감, 주도권, 상호 인식 차이를 가능한 한 구체적으로 포함한다. 지속 중인 관계와 이미 해소된 과거 상태를 구분하고, 최신 확정 변화만 반영한다.\n\n현재 장면: currentState는 이번 입력의 가장 마지막으로 진행된 실제 장면이다. 장소·등장 인물·진행 중 갈등·마지막 상황을 구체적으로 적는다. 이 묶음의 마지막을 전체 스토리의 마지막이라고 단정하지 않는다.\n\n미해결: clues에 진행 중인 갈등, 미이행 약속·합의·조건·일정·복선의 현재 영향 및 위험을 보존한다. 완료·취소된 약속을 현재 유효한 것으로 기록하지 않는다. knowledge에서 누가 무엇을 알고 모르는지 구분한다. 미확인 내면·미래 사건을 확정하지 않는다.\n\n대사와 근거: 고백·협박·약속·선언·관계가 변한 대사는 실제 원문에 있는 표현만 큰따옴표로 인용한다. 의역은 따옴표 없이 간접 서술한다.  OOC는 작품 사건이 아니다. 모순 issues는 제타 AI의 서사 기억 오류만 감지한다. 과거에 확정된 장소 위치·외모·이력·관계·호칭·기본 말투·과거 사건·지식·세계관 사실을 AI가 이후 객관적 지문에서 다르게 서술한 경우만 보고한다. 캐릭터의 거짓말·변명·주관적인 대사·감정과 행동 불일치·논쟁·질투·독점욕·플러팅·반박·상대의 주장을 부정하는 말은 절대로 모순으로 취급하지 않는다. 최신 내용이 인물의 발언이면 모순 후보에서 제외한다. 확정된 설정이 실제 전개에서 변경되었다면 모순이 아니다. 과거 근거의 정확한 원문 연속 부분 문자열 evidenceQuote와 과거 원문 ID evidenceIds, 충돌하는 최신 AI 객관적 서술의 정확한 연속 부분 문자열 quote와 최신 원문 ID sourceIds를 모두 제공한다. 반드시 statementType=narration, errorType=place/appearance/relationship/history/speech/knowledge/timeline/world 중 하나로 작성하고 명확한 충돌 근거가 없으면 issues=[]로 둔다.\n\n출력: 글자 수·사건 수 할당량이 없다. 누락을 줄이기 위해 모든 원문 메시지를 확인하되 사건을 억지로 늘리지 않는다. 응답은 코드 블록 없이 JSON 객체 하나. 원문이 없는 항목은 빈 배열, 미상 가족·비밀은 빈 문자열. sourceIds는 실제 제공된 row ID만 사용한다.";
-    const format="{\"events\":[{\"description\":\"배경·행동·반응·결과·영향\",\"timeType\":\"present\",\"orderInSource\":0,\"advanceDays\":0,\"absoluteDate\":null,\"sourceIds\":[\"원문 ID\"],\"importance\":\"normal\",\"episodeKey\":\"강당-자리다툼\"}],\"currentState\":{\"summary\":\"입력 마지막 실제 장면\",\"location\":\"\",\"people\":\"\",\"conflict\":\"\",\"sourceIds\":[\"원문 ID\"]},\"emotions\":[{\"person\":\"\",\"target\":\"\",\"feeling\":\"\",\"reason\":\"\",\"behavior\":\"\",\"certainty\":\"explicit\",\"sourceIds\":[\"원문 ID\"]}],\"facts\":[{\"text\":\"\",\"tag\":\"설정\",\"sourceIds\":[\"원문 ID\"],\"importance\":\"high\"}],\"characters\":[{\"name\":\"\",\"traits\":\"\",\"family\":\"\",\"secrets\":\"\",\"sourceIds\":[\"원문 ID\"]}],\"relations\":[{\"a\":\"\",\"b\":\"\",\"status\":\"현재 관계 유지 방식\",\"sourceIds\":[\"원문 ID\"]}],\"clues\":[{\"title\":\"\",\"detail\":\"현재 영향·미이행 조건\",\"status\":\"open\",\"sourceIds\":[\"원문 ID\"]}],\"knowledge\":[{\"character\":\"\",\"text\":\"\",\"status\":\"knows\",\"sourceIds\":[\"원문 ID\"]}],\"issues\":[{\"quote\":\"AI 객관적 서술 그대로\",\"reason\":\"과거 확정 사실과 다른 점\",\"correction\":\"기존 설정에 부합하는 정정\",\"statementType\":\"narration\",\"errorType\":\"place\",\"evidenceQuote\":\"이전 원문의 정확한 근거 문구\",\"sourceIds\":[\"최신 원문 ID\"],\"evidenceIds\":[\"과거 원문 ID\"]}]}";
+    const guidance="역할: RP 기록 보관자. 다음 대화가 정확히 이어질 수 있도록 원문 기반 서사를 보존한다. 요약 길이를 맞추려 디테일을 삭제하지 말고 원문에 없는 사건·대사·심리를 만들지 않는다.\n\n사건: 타임라인의 한 항목은 한 문장이나 한 동작이 아니라 한 장면의 완결된 사건 흐름(에피소드)이다. 대화 한두 줄, 몸짓, 감정 표현, 인물 등장, 장소 이동을 각각 독립 사건으로 작성하지 마라. 같은 목표·상황·갈등을 중심으로 이어진 행동→상대 반응→추가 행동→결과를 가능한 한 하나의 충분히 상세한 사건 문단으로 묶는다. 같은 장면의 작은 반응은 사건 설명 속에 포함한다. 독립된 새 갈등이 시작되거나 중요한 약속·결정·관계 전환 또는 결과가 확정될 때만 별도 항목으로 나눈다. 사건 하나에는 충분한 원문 근거와 인물별 행동·대사·변화 과정을 여러 문장으로 기록하며, 'A는 도발적이다'와 같은 성격·상태만을 사건으로 만들지 않는다. 동일한 장소·시간·갈등에서 이어지는 행동과 그 직접 결과는 서로 다른 메시지와 API 묶음에 걸쳐도 하나의 에피소드다. events의 episodeKey에는 같은 연속 장면에만 동일한 짧은 장면 식별자(예: 장소-핵심상황)를 넣는다. 새 장소·시점·독립 갈등이면 새 키를 사용한다. 이전 누적 사건의 마지막 장면이 이번 대화에서 그대로 이어졌다면 동일한 episodeKey를 재사용할 수 있다. 처음부터 여러 메시지에 걸친 하나의 장면을 하나의 events 항목으로 작성하라. 경고를 한 사건, 경고에 물러나는 반응을 다른 사건, 옆 인물의 즉각적 반응을 또 다른 사건으로 나누지 않는다. 사건의 시작(목표)→행동→상대 반응→결과를 하나의 상세한 문단에 기록한다. 같은 장소와 시각에 같은 갈등이 진행 중이면 행동의 강도가 올라가거나 인물이 추가로 반응해도 같은 에피소드다. 서로 다른 사건으로 나누는 기준은 새로운 별개 목적이나 갈등, 실제 시간/장소 전환 또는 새로운 독립 사건의 시작이다. 중요한 고백이나 결정이 기존 갈등의 일부라면 그 에피소드 안에 반드시 포함하되 별도 사건으로 중복 작성하지 않는다. 분석 입력이 여기서 끝나도 미완료 장면은 종료된 것으로 단정하지 않고 기존 에피소드의 계속 진행으로 기록한다. 연속 장면에 독립 이벤트를 여러 개 생성하지 말고, 원문에 있는 행동·반응·변화의 세부 내용을 삭제하지 않는다. events의 continuesPreviousEpisode에는 같은 장면이 직전 저장된 사건에서 이어질 때 true를, 독립 사건이면 false를 적는다. episodeKey는 같은 장소와 구체적인 목표·갈등을 표시하는 일관된 식별자로 사용하며, 인물 이름만으로 키를 만들지 말고 이전 사건과 연결되면 정확히 같은 키를 사용한다. 한 장면을 단문 사건 여러 개로 쪼개지 마라. 사건 수를 늘리는 것이 아니라 실제 전개를 누락 없이 보존하는 것이 목표다. 한 날짜에 수십 개의 사소한 항목을 생성하지 말고 의미 있는 에피소드 중심으로 기록한다.\n\n순서: 입력 원문의 order는 채팅 출력 순서이지 세계관 날짜가 아니다. events를 사건 근거의 순서대로 반환하고, 한 원문에 여러 사건이 있으면 orderInSource를 0,1,2...로 표시한다. sourceIds에 해당 사건의 정확한 메시지 ID를 적는다. 나중에 밝혀진 과거 사건은 timeType=past로, 현재 사건은 present로 명시한다. 과거 사실이 지금 공개된 일 자체도 중요하면 현재의 공개 사건을 따로 기록한다.\n\n날짜: 실제 채팅 작성 날짜를 이야기 날짜로 쓰지 않는다. 사건 근거에 연월일이 명시되었을 때만 absoluteDate=YYYY-MM-DD, 아니면 null. 다음 날·사흘 뒤 같은 명백한 시간 경과의 첫 사건에만 advanceDays를 사용한다. 위젯·상태창은 참고하지만 본문과 충돌하면 본문 우선. 일시적 속마음이나 계획을 실행된 일로 기록하지 않는다. 모르면 불명으로 남긴다.\n\n감정: 지속적으로 행동에 영향을 미치는 감정을 emotions에서 인물→대상 방향으로 적고 종류·강도·원인·행동 패턴을 보존한다. 일시적 감정이나 해결된 감정은 현재 감정선에 넣지 않는다. 명시적 감정은 explicit, 반복 행동에 근거한 해석은 inferred, 근거가 불충분하면 기록하지 않는다. 보호심이나 끌림을 사랑으로 확대하지 않는다.\n\n관계: relations의 status는 현재 관계 단계와 애정·신뢰 방식, 갈등 해결 방식, 거리감, 주도권, 상호 인식 차이를 가능한 한 구체적으로 포함한다. 지속 중인 관계와 이미 해소된 과거 상태를 구분하고, 최신 확정 변화만 반영한다.\n\n현재 장면: currentState는 이번 입력의 가장 마지막으로 진행된 실제 장면이다. 장소·등장 인물·진행 중 갈등·마지막 상황을 구체적으로 적는다. 이 묶음의 마지막을 전체 스토리의 마지막이라고 단정하지 않는다.\n\n미해결: clues에 진행 중인 갈등, 미이행 약속·합의·조건·일정·복선의 현재 영향 및 위험을 보존한다. 완료·취소된 약속을 현재 유효한 것으로 기록하지 않는다. knowledge에서 누가 무엇을 알고 모르는지 구분한다. 미확인 내면·미래 사건을 확정하지 않는다.\n\n대사와 근거: 고백·협박·약속·선언·관계가 변한 대사는 실제 원문에 있는 표현만 큰따옴표로 인용한다. 의역은 따옴표 없이 간접 서술한다.  OOC는 작품 사건이 아니다. 모순 issues는 제타 AI의 서사 기억 오류만 감지한다. 과거에 확정된 장소 위치·외모·이력·관계·호칭·기본 말투·과거 사건·지식·세계관 사실을 AI가 이후 객관적 지문에서 다르게 서술한 경우만 보고한다. 캐릭터의 거짓말·변명·주관적인 대사·감정과 행동 불일치·논쟁·질투·독점욕·플러팅·반박·상대의 주장을 부정하는 말은 절대로 모순으로 취급하지 않는다. 최신 내용이 인물의 발언이면 모순 후보에서 제외한다. 확정된 설정이 실제 전개에서 변경되었다면 모순이 아니다. 과거 근거의 정확한 원문 연속 부분 문자열 evidenceQuote와 과거 원문 ID evidenceIds, 충돌하는 최신 AI 객관적 서술의 정확한 연속 부분 문자열 quote와 최신 원문 ID sourceIds를 모두 제공한다. 반드시 statementType=narration, errorType=place/appearance/relationship/history/speech/knowledge/timeline/world 중 하나로 작성하고 명확한 충돌 근거가 없으면 issues=[]로 둔다.\n\n출력: 글자 수·사건 수 할당량이 없다. 누락을 줄이기 위해 모든 원문 메시지를 확인하되 사건을 억지로 늘리지 않는다. 응답은 코드 블록 없이 JSON 객체 하나. 원문이 없는 항목은 빈 배열, 미상 가족·비밀은 빈 문자열. sourceIds는 실제 제공된 row ID만 사용한다.";
+    const format="{\"events\":[{\"description\":\"배경·행동·반응·결과·영향\",\"timeType\":\"present\",\"orderInSource\":0,\"advanceDays\":0,\"absoluteDate\":null,\"sourceIds\":[\"원문 ID\"],\"importance\":\"normal\",\"episodeKey\":\"강당-자리다툼\",\"continuesPreviousEpisode\":false}],\"currentState\":{\"summary\":\"입력 마지막 실제 장면\",\"location\":\"\",\"people\":\"\",\"conflict\":\"\",\"sourceIds\":[\"원문 ID\"]},\"emotions\":[{\"person\":\"\",\"target\":\"\",\"feeling\":\"\",\"reason\":\"\",\"behavior\":\"\",\"certainty\":\"explicit\",\"sourceIds\":[\"원문 ID\"]}],\"facts\":[{\"text\":\"\",\"tag\":\"설정\",\"sourceIds\":[\"원문 ID\"],\"importance\":\"high\"}],\"characters\":[{\"name\":\"\",\"traits\":\"\",\"family\":\"\",\"secrets\":\"\",\"sourceIds\":[\"원문 ID\"]}],\"relations\":[{\"a\":\"\",\"b\":\"\",\"status\":\"현재 관계 유지 방식\",\"sourceIds\":[\"원문 ID\"]}],\"clues\":[{\"title\":\"\",\"detail\":\"현재 영향·미이행 조건\",\"status\":\"open\",\"sourceIds\":[\"원문 ID\"]}],\"knowledge\":[{\"character\":\"\",\"text\":\"\",\"status\":\"knows\",\"sourceIds\":[\"원문 ID\"]}],\"issues\":[{\"quote\":\"AI 객관적 서술 그대로\",\"reason\":\"과거 확정 사실과 다른 점\",\"correction\":\"기존 설정에 부합하는 정정\",\"statementType\":\"narration\",\"errorType\":\"place\",\"evidenceQuote\":\"이전 원문의 정확한 근거 문구\",\"sourceIds\":[\"최신 원문 ID\"],\"evidenceIds\":[\"과거 원문 ID\"]}]}";
     return guidance+'\n\nJSON 예시 형식: '+format+
+      '\n\n[직전 진행 중인 에피소드 — 이번 묶음이 계속되는지 최우선 확인]\n'+recentEpisodeContext()+
       '\n\n[기존 누적 기억 — 맥락 참고용, 과거 사건을 중복 생성하지 말 것]\n'+memoryContext()+
       '\n\n[이번 입력의 전체 대화 원문 — 빠짐없이 확인]\n'+JSON.stringify(payload);
   }
@@ -917,9 +934,9 @@
       <div class="zmm-row"><button data-act="timeline-merge">선택 사건 합치기 (2개 이상)</button></div>
       <h4>선택 사건 날짜 일괄 변경</h4>
       <label>날짜 종류 <select id="zmm-bulk-date-mode" data-field="bulk-date-mode">
-        <option value="absolute">실제 날짜 (연-월-일)</option><option value="relative">이야기 날짜 (D+N)</option>
+        <option value="absolute">실제 날짜 (YYYYMMDD 숫자 입력)</option><option value="relative">이야기 날짜 (D+N)</option>
       </select></label>
-      <label id="zmm-bulk-absolute-wrap">실제 날짜 <input id="zmm-bulk-absolute" type="date"></label>
+      <label id="zmm-bulk-absolute-wrap">실제 날짜 (YYYYMMDD) <input id="zmm-bulk-absolute" type="text" inputmode="numeric" pattern="[0-9]{8}" maxlength="8" autocomplete="off" placeholder="예: 20250412"></label>
       <label id="zmm-bulk-relative-wrap" hidden>이야기 날짜 D+ <input id="zmm-bulk-relative" type="number" min="0" max="365000" step="1" value="1"></label>
       <button data-act="timeline-bulk-date">선택 사건 날짜 적용</button>`:''}
     </div>`;
@@ -1362,8 +1379,10 @@
     const mode=$('#zmm-bulk-date-mode',panel)?.value||'absolute';
     let date=null,day=null,label='';
     if(mode==='absolute'){
-      date=$('#zmm-bulk-absolute',panel)?.value||'';
-      if(!validAbsoluteDate(date))return setStatus('올바른 실제 날짜를 선택해 주세요.');
+      const typed=String($('#zmm-bulk-absolute',panel)?.value||'').trim();
+      if(!/^\d{8}$/.test(typed))return setStatus('실제 날짜는 YYYYMMDD 숫자 8자리로 입력해 주세요. 예: 20250412');
+      date=typed.slice(0,4)+'-'+typed.slice(4,6)+'-'+typed.slice(6,8);
+      if(!validAbsoluteDate(date))return setStatus('존재하지 않는 날짜입니다. YYYYMMDD를 확인해 주세요.');
       label=prettyDate(date);
     }else{
       day=Number($('#zmm-bulk-relative',panel)?.value);
