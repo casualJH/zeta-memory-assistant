@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         제타 AI 기억력 보조 (서사·모순·상기)
 // @namespace    zeta-memory-assistant
-// @version      0.1.4
+// @version      0.1.5
 // @description  과거 대화 로컬 보관, Gemini 서사 기억, 모순 의심 표시, 정정·상기 복사, 기억 검색
 // @updateURL    https://raw.githubusercontent.com/casualJH/zeta-memory-assistant/main/zeta-memory-assistant.user.js
 // @downloadURL  https://raw.githubusercontent.com/casualJH/zeta-memory-assistant/main/zeta-memory-assistant.user.js
@@ -30,7 +30,7 @@
   'use strict';
   if (window.__zetaMemoryAssistantV1) return;
   window.__zetaMemoryAssistantV1 = true;
-  const VERSION = '0.1.4';
+  const VERSION = '0.1.5';
   const DB_NAME = 'zeta-memory-assistant-db-v1';
   const UUID = /^[0-9a-f]{8}-(?:[0-9a-f]{4}-){3}[0-9a-f]{12}$/i;
   const CHANNEL = 'zmm-' + Array.from(crypto.getRandomValues(new Uint8Array(12)), n => n.toString(16).padStart(2, '0')).join('');
@@ -1114,6 +1114,7 @@
       <div><strong>${(u.output||0).toLocaleString()}</strong><span>출력 토큰</span></div>
       <div><strong>${(u.thinking||0).toLocaleString()}</strong><span>사고 토큰</span></div></div>
       <p class="zmm-muted">API 분석을 실행하면 선택된 대화 본문과 필요한 과거 기억이 Google Gemini API로 전송됩니다. 사용 전 데이터 전송에 동의하는 경우에만 API 키를 등록하세요.</p>
+      <p><a href="https://aistudio.google.com/rate-limit" target="_blank" rel="noopener noreferrer">API 사용량 및 제한 확인</a></p>
       <h4>API 이용 등급</h4>
       <label class="zmm-line">이용 방식 <select id="zmm-billing-mode" data-field="billingMode">
         <option value="free" ${apiSettings.billingMode!=='paid'?'selected':''}>무료 등급 (기본)</option>
