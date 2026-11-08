@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         제타 AI 기억력 보조 (서사·모순·상기)
 // @namespace    zeta-memory-assistant
-// @version      0.0.7
+// @version      0.0.8
 // @description  과거 대화 로컬 보관, Gemini 서사 기억, 모순 의심 표시, 정정·상기 복사, 기억 검색
 // @updateURL    https://raw.githubusercontent.com/casualJH/zeta-memory-assistant/main/zeta-memory-assistant.user.js
 // @downloadURL  https://raw.githubusercontent.com/casualJH/zeta-memory-assistant/main/zeta-memory-assistant.user.js
@@ -30,14 +30,14 @@
   'use strict';
   if (window.__zetaMemoryAssistantV1) return;
   window.__zetaMemoryAssistantV1 = true;
-  const VERSION = '0.0.7';
+  const VERSION = '0.0.8';
   const DB_NAME = 'zeta-memory-assistant-db-v1';
   const UUID = /^[0-9a-f]{8}-(?:[0-9a-f]{4}-){3}[0-9a-f]{12}$/i;
   const CHANNEL = 'zmm-' + Array.from(crypto.getRandomValues(new Uint8Array(12)), n => n.toString(16).padStart(2, '0')).join('');
   const BASE_MODEL = 'gemini-3.1-flash-lite';
   const RECOMMENDED_MODELS = ['gemini-3.1-flash-lite','gemini-3.5-flash-lite','gemini-2.5-flash-lite','gemini-2.5-flash'];
   const MODEL_PRICES = {'gemini-3.1-flash-lite':[0.25,1.50],'gemini-3.5-flash-lite':[0.30,2.50],'gemini-2.5-flash-lite':[0.10,0.40],'gemini-2.5-flash':[0.30,2.50]};
-  const MAX_CHUNK = 15000;
+  const MAX_CHUNK = 6500;
   const SAFETY = ['HARM_CATEGORY_HARASSMENT','HARM_CATEGORY_HATE_SPEECH','HARM_CATEGORY_SEXUALLY_EXPLICIT','HARM_CATEGORY_DANGEROUS_CONTENT']
     .map(category => ({category,threshold:'BLOCK_NONE'}));
   const $ = (selector, root=document) => root.querySelector(selector);
@@ -594,7 +594,8 @@
   function mergePatch(delta,chunkRows){
     const mem=roomData.memory,allowed=chunkRows.map(x=>x.id),idMap=new Map(chunkRows.map(x=>[x.id,x]));
     let changed=0;
-    for(const ev of safeArray(delta.events).slice(0,50)){
+    const timeCueConsumed=new Set();
+    for(const ev of safeArray(delta.events).slice(0,100)){
       const sourceIds=sanitizeSources(ev?.sourceIds,allowed);if(!sourceIds.length)continue;
       const description=ensureShort(ev.description,800);if(!description)continue;
       const evidenceText=sourceIds.map(id=>idMap.get(id)?.text||'').join('\n');
@@ -612,6 +613,11 @@
       // A story-date increment must be both requested and explicitly countable in the cited dialogue.
       // If the AI chooses the wrong day count, use the actual text-grounded number instead.
       let advance=requested>0?grounded:0;
+      // Several distinct events may cite one message containing one time transition.
+      // Advance the story calendar only once for each cited transition message.
+      const timeSource=sourceIds.find(id=>explicitDayAdvance(idMap.get(id)?.text||'')>0);
+      if(advance>0&&timeSource&&timeCueConsumed.has(timeSource))advance=0;
+      if(advance>0&&timeSource)timeCueConsumed.add(timeSource);
       if(!mem.timeline.length)advance=0;
       mem.dayIndex+=advance;
       if(date)mem.absoluteDate=date;
@@ -670,6 +676,14 @@
       `events[].absoluteDate는 해당 사건의 실제 날짜 YYYY-MM-DD가 그 사건의 근거 문장에 명시적으로 등장할 때에만 작성하고 그 외엔 null입니다. `+
       `날짜가 실제로 바뀐 명시적 단서(다음 날, 사흘 뒤 등)가 있을 때만 events[].advanceDays를 이전 사건 대비 1 이상으로 적으세요. 단서가 없으면 0입니다. `+
       `events[].absoluteDate에는 해당 사건 원문에서 연/월/일까지 명시되어 있는 경우에만 YYYY-MM-DD를 쓰고, 그렇지 않다면 null을 쓰세요. `+
+      `타임라인은 분석 묶음당 1개로 작성하는 것이 아닙니다. 이번 대화에 실제로 일어난 사건을 빠짐없이 서로 독립된 events 배열 항목으로 나누세요. `+
+      `한 개의 긴 메시지에 여러 사건이 나와도 사건마다 별도 항목을 만들고 같은 sourceIds를 중복 사용해도 됩니다. `+
+      `장소 이동, 새로운 인물의 등장, 만남, 대화 중 밝혀진 중요 사실, 갈등, 다툼, 화해, 약속, 고백, 관계 변화, 결심과 행동은 각기 별도 사건입니다. `+
+      `다만 아무 사건도 없는 문장, 반복되는 묘사, 장면의 사소한 동작은 억지로 사건으로 늘리지 마세요. `+
+      `사건마다 인물, 행동, 상대, 원인, 결과, 장소와 상황 중 원문에서 확인되는 구체적 내용을 설명하세요. `+
+      `'둘이 대화했다', '관계가 발전했다'처럼 모호하게 하나로 합치지 말고 실제 행동과 발생한 일을 구분하세요. `+
+      `한 메시지에서 같은 시간 경과 표현이 여러 사건에 적용되면 날짜 증가는 처음 발생한 사건에만 적고 나머지 사건은 advanceDays=0으로 작성하세요. `+
+      `사건 수는 메시지 수가 아니라 실제 서사 속 사건 수를 따르며, 근거가 없는 사건은 추가하지 않습니다. `+
       `일어난 일이 없는 경우 빈 배열을 쓰세요. 현재 세계관 내에서 갈등, 오해, 거짓말, 복선은 반드시 설정 오류라고 단정하지 마세요. `+
       `issues는 이전 확정 정보와 충돌하는 *최신 캐릭터 지문*만 포함하고 quote는 현재 지문의 정확한 연속 부분 문자열로 작성하세요. `+
       `근거 부족은 모순으로 표시하지 마세요. 원본 메시지 ID를 반드시 sourceIds에 넣으세요. 대사 인용을 할 때는 실제 대화에 존재하는 문장만 따옴표로 인용하세요. `+
@@ -910,8 +924,11 @@
       <input id="zmm-file" type="file" accept=".json,application/json" hidden>
       <p class="zmm-muted">복원 시 현재 채팅방 ID와 백업의 채팅방 ID가 같아야 하며, 이 채팅방의 기록을 대체합니다. 백업 파일에는 대화 원문이 포함됩니다.</p>
       <h4>분석 다시 시작</h4>
-      <div class="zmm-row"><button data-act="rebuild">요약 전체 재분석 준비</button></div>
-      <p class="zmm-muted">기존 자동 요약은 초기화하되 사용자가 직접 추가·편집한 항목과 고정 지침은 유지합니다. 이후 미분석 대화 요약을 눌러 다시 분석합니다.</p>`;
+      <p class="zmm-muted">기존 요약을 초기화하고 원문 대화를 바탕으로 처음부터 재분석할 수 있습니다. 원문 대화는 삭제하지 않습니다.</p>
+      <label class="zmm-line"><span>수동 편집·직접 추가한 기억·고정 지침도 함께 초기화</span>
+        <input id="zmm-reset-manual" type="checkbox"></label>
+      <p class="zmm-muted">기본값(체크 안 함): 수동 수정 및 고정한 기록 유지. 체크하면 모든 기억과 고정 지침을 삭제합니다. 중요한 기록은 먼저 JSON 백업을 권장합니다.</p>
+      <div class="zmm-row"><button data-act="rebuild">기억 초기화 후 재분석 준비</button></div>`;
   }
   function editingMarkup(){
     const item=safeUiItem(ui.edit?.kind,ui.edit?.id);
@@ -1035,12 +1052,24 @@
     }catch(e){setStatus('JSON 복원 실패: '+String(e.message||e));}
   }
   async function resetAnalysis(){
-    if(!roomData||!confirm('AI가 만든 요약·모순 기록을 초기화하고 처음부터 다시 분석할까요? 수동 편집 및 고정한 기록은 유지합니다.'))return;
+    if(!roomData)return;
+    if(analysisBusy||syncBusy){setStatus('대화 수집 또는 분석이 진행 중입니다. 완료하거나 중지한 뒤 초기화해 주세요.');return;}
+    const eraseManual=!!$('#zmm-reset-manual')?.checked;
+    const message=eraseManual
+      ?'이 채팅방의 모든 기억을 초기화합니다. 수동 편집, 직접 추가한 기억, 중요도, 고정 지침, 모순 기록도 모두 삭제합니다. 원본 대화는 남기고 처음부터 재분석할까요?'
+      :'AI가 만든 요약·모순 기록을 초기화하고 처음부터 다시 분석할까요? 수동 편집 및 고정 기록은 유지합니다.';
+    if(!confirm(message))return;
     analysisStop=true;
-    const prev=roomData.memory,next=defaultMemory();
-    for(const key of ['timeline','characters','relations','clues','facts','issues','knowledge'])next[key]=prev[key].filter(x=>x.manual);
-    next.pinnedText=prev.pinnedText;
-    roomData.memory=next;await saveRoom();setStatus('분석 초기화 완료. 미분석 대화 요약 버튼을 누르세요.');render();
+    const previous=roomData.memory,next=defaultMemory();
+    if(!eraseManual){
+      for(const key of ['timeline','characters','relations','clues','facts','issues','knowledge'])
+        next[key]=safeArray(previous[key]).filter(x=>x.manual);
+      next.pinnedText=previous.pinnedText;
+    }
+    roomData.memory=next;
+    await saveRoom();
+    setStatus(eraseManual?'모든 기억 초기화 완료 · 원본 대화 유지 · 처음부터 다시 분석할 수 있습니다.':'AI 기억 초기화 완료 · 수동 편집 및 고정 기록 유지 · 다시 분석할 수 있습니다.');
+    render();
   }
   function handleEditSave(){
     const item=safeUiItem(ui.edit?.kind,ui.edit?.id);if(!item)return;
