@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         제타 AI 기억력 보조 (서사·모순·상기)
 // @namespace    zeta-memory-assistant
-// @version      0.1.3
+// @version      0.1.4
 // @description  과거 대화 로컬 보관, Gemini 서사 기억, 모순 의심 표시, 정정·상기 복사, 기억 검색
 // @updateURL    https://raw.githubusercontent.com/casualJH/zeta-memory-assistant/main/zeta-memory-assistant.user.js
 // @downloadURL  https://raw.githubusercontent.com/casualJH/zeta-memory-assistant/main/zeta-memory-assistant.user.js
@@ -30,7 +30,7 @@
   'use strict';
   if (window.__zetaMemoryAssistantV1) return;
   window.__zetaMemoryAssistantV1 = true;
-  const VERSION = '0.1.3';
+  const VERSION = '0.1.4';
   const DB_NAME = 'zeta-memory-assistant-db-v1';
   const UUID = /^[0-9a-f]{8}-(?:[0-9a-f]{4}-){3}[0-9a-f]{12}$/i;
   const CHANNEL = 'zmm-' + Array.from(crypto.getRandomValues(new Uint8Array(12)), n => n.toString(16).padStart(2, '0')).join('');
@@ -861,7 +861,13 @@
       <label class="zmm-line"><span>새 대화 자동 분석</span><input id="zmm-auto-home" type="checkbox" data-field="auto" ${apiSettings.auto?'checked':''}></label>
       <div class="zmm-info">${esc(roomData.lastSync?'전체 수집 완료 시각(기기 기준): '+new Date(roomData.lastSync).toLocaleString('ko-KR'):'전체 수집 전입니다. 채팅방 새로고침 후 수집을 시작하세요.')}</div>
       <div class="zmm-row"><button data-act="tab" data-tab="conflicts">모순 정정</button><button data-act="tab" data-tab="remind">전체 서사 상기</button></div>
-      <div class="zmm-info">API 호출 ${usage.calls||0}회 · 전체 토큰 ${((usage.input||0)+(usage.output||0)+(usage.thinking||0)).toLocaleString()}개</div>`;
+      <div class="zmm-info">API 호출 ${usage.calls||0}회 · 전체 토큰 ${((usage.input||0)+(usage.output||0)+(usage.thinking||0)).toLocaleString()}개</div>
+      <h4>분석 다시 시작</h4>
+      <p class="zmm-muted">기존 요약을 초기화하고 원문 대화를 바탕으로 처음부터 재분석할 수 있습니다. 원문 대화는 삭제하지 않습니다.</p>
+      <label class="zmm-line"><span>수동 편집·직접 추가한 기억·고정 지침도 함께 초기화</span>
+        <input id="zmm-reset-manual" type="checkbox"></label>
+      <p class="zmm-muted">기본값(체크 안 함): 수동 수정 및 고정한 기록 유지. 체크하면 모든 기억과 고정 지침을 삭제합니다. 중요한 기록은 먼저 JSON 백업을 권장합니다.</p>
+      <div class="zmm-row"><button data-act="rebuild">기억 초기화 후 재분석 준비</button></div>`;
   }
   function timelineMarkup(){
     const list=orderedTimeline(),grouping=new Map();
@@ -1124,12 +1130,7 @@
       <div class="zmm-row"><button data-act="backup">기억·요약 결과 백업</button><button data-act="import">기억·요약 결과 복원</button></div>
       <input id="zmm-file" type="file" accept=".json,application/json" hidden>
       <p class="zmm-muted">백업에는 스크립트가 저장한 타임라인·인물·관계·감정선·설정·모순·분석 진행 기록과 수동 기억만 포함됩니다. 대화 원문·API 키는 포함되지 않습니다. 복원은 같은 채팅방의 기억만 대체하며 수집된 원문은 유지합니다. 이전 버전의 JSON 백업도 기억만 복원합니다.</p>
-      <h4>분석 다시 시작</h4>
-      <p class="zmm-muted">기존 요약을 초기화하고 원문 대화를 바탕으로 처음부터 재분석할 수 있습니다. 원문 대화는 삭제하지 않습니다.</p>
-      <label class="zmm-line"><span>수동 편집·직접 추가한 기억·고정 지침도 함께 초기화</span>
-        <input id="zmm-reset-manual" type="checkbox"></label>
-      <p class="zmm-muted">기본값(체크 안 함): 수동 수정 및 고정한 기록 유지. 체크하면 모든 기억과 고정 지침을 삭제합니다. 중요한 기록은 먼저 JSON 백업을 권장합니다.</p>
-      <div class="zmm-row"><button data-act="rebuild">기억 초기화 후 재분석 준비</button></div>`;
+`;
   }
   function editingMarkup(){
     const item=safeUiItem(ui.edit?.kind,ui.edit?.id);
