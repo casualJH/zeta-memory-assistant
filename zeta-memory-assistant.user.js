@@ -725,7 +725,8 @@
     const m=roomData.memory;
     const arr={fixed:m.facts.filter(x=>x.importance==='critical'||x.importance==='high'||x.manual).slice(-90),
       people:m.characters.slice(-40),relations:m.relations.slice(-50),clues:m.clues.filter(x=>x.status!=='solved').slice(-45),
-      knowledge:m.knowledge.slice(-55),events:m.timeline.slice(-65),lastIssues:m.issues.filter(x=>x.status!=='dismissed').slice(-18),
+      knowledge:m.knowledge.slice(-55),emotions:m.emotions.slice(-50),currentState:m.currentState,
+      events:orderedTimeline().slice(-65),lastIssues:m.issues.filter(x=>x.status!=='dismissed').slice(-18),
       pinnedText:m.pinnedText,dayIndex:m.dayIndex,currentStoryDate:m.absoluteDate};
     const referenced=[...new Set([...arr.fixed,...arr.events.slice(-25),...arr.lastIssues].flatMap(x=>safeArray(x.sourceIds)))].slice(-50);
     arr.originalEvidence=referenced.map(id=>({id,text:truncate(findSource(id)?.text||'',300)})).filter(x=>x.text);
@@ -733,34 +734,12 @@
     return s.slice(0,32000);
   }
   function analysisPrompt(rows){
-    const payload=rows.map(m=>({id:m.id,speaker:m.speaker,role:m.role,kind:m.kind,text:m.text.slice(0,9000)}));
-    return `당신은 롤플레잉 채팅의 근거 중심 연속성 기록자입니다. 사용자가 보낸 말과 캐릭터가 실제 출력한 지문 외에 새 사실을 만들지 마세요.\n`+
-      `실제 채팅 작성 시각은 작품 날짜가 아닙니다. 작품 내 YYYY년 MM월 DD일이 직접 언급된 경우에만 absolute date를 인정합니다. 날짜가 없으면 내부 D+1부터 시작합니다. `+
-      `events[].absoluteDate는 해당 사건의 실제 날짜 YYYY-MM-DD가 그 사건의 근거 문장에 명시적으로 등장할 때에만 작성하고 그 외엔 null입니다. `+
-      `날짜가 실제로 바뀐 명시적 단서(다음 날, 사흘 뒤 등)가 있을 때만 events[].advanceDays를 이전 사건 대비 1 이상으로 적으세요. 단서가 없으면 0입니다. `+
-      `events[].absoluteDate에는 해당 사건 원문에서 연/월/일까지 명시되어 있는 경우에만 YYYY-MM-DD를 쓰고, 그렇지 않다면 null을 쓰세요. `+
-      `타임라인은 분석 묶음당 1개로 작성하는 것이 아닙니다. 이번 대화에 실제로 일어난 사건을 빠짐없이 서로 독립된 events 배열 항목으로 나누세요. `+
-      `한 개의 긴 메시지에 여러 사건이 나와도 사건마다 별도 항목을 만들고 같은 sourceIds를 중복 사용해도 됩니다. `+
-      `장소 이동, 새로운 인물의 등장, 만남, 대화 중 밝혀진 중요 사실, 갈등, 다툼, 화해, 약속, 고백, 관계 변화, 결심과 행동은 각기 별도 사건입니다. `+
-      `다만 아무 사건도 없는 문장, 반복되는 묘사, 장면의 사소한 동작은 억지로 사건으로 늘리지 마세요. `+
-      `사건마다 인물, 행동, 상대, 원인, 결과, 장소와 상황 중 원문에서 확인되는 구체적 내용을 설명하세요. `+
-      `'둘이 대화했다', '관계가 발전했다'처럼 모호하게 하나로 합치지 말고 실제 행동과 발생한 일을 구분하세요. `+
-      `한 메시지에서 같은 시간 경과 표현이 여러 사건에 적용되면 날짜 증가는 처음 발생한 사건에만 적고 나머지 사건은 advanceDays=0으로 작성하세요. `+
-      `사건 수는 메시지 수가 아니라 실제 서사 속 사건 수를 따르며, 근거가 없는 사건은 추가하지 않습니다. `+
-      `일어난 일이 없는 경우 빈 배열을 쓰세요. 현재 세계관 내에서 갈등, 오해, 거짓말, 복선은 반드시 설정 오류라고 단정하지 마세요. `+
-      `issues는 이전 확정 정보와 충돌하는 *최신 캐릭터 지문*만 포함하고 quote는 현재 지문의 정확한 연속 부분 문자열로 작성하세요. `+
-      `근거 부족은 모순으로 표시하지 마세요. 원본 메시지 ID를 반드시 sourceIds에 넣으세요. 대사 인용을 할 때는 실제 대화에 존재하는 문장만 따옴표로 인용하세요. `+
-      `facts에 확정 사실을 넣되 추측은 확정 사실처럼 기록하지 마세요. 사건, 인물관계, 비밀, 지식 구분(누가 아는지)도 기록하세요. `+
-      `OOC 지시문이나 요약 요청 자체를 작품 속에서 실제로 발생한 사건으로 기록하지 마세요.\n`+
-      `JSON 객체만 응답하세요. 형식: {"events":[{"description":"","advanceDays":0,"absoluteDate":null,"sourceIds":["..."],"importance":"normal"}],`+
-      `"facts":[{"text":"","tag":"설정","sourceIds":["..."],"importance":"high"}],`+
-      `"characters":[{"name":"","traits":"","family":"","secrets":"","sourceIds":["..."]}],`+
-      `"relations":[{"a":"","b":"","status":"","sourceIds":["..."]}],`+
-      `"clues":[{"title":"","detail":"","status":"open","sourceIds":["..."]}],`+
-      `"knowledge":[{"character":"","text":"","status":"knows","sourceIds":["..."]}],`+
-      `"issues":[{"quote":"원문 그대로","reason":"","correction":"","sourceIds":["최신 메시지 ID"],"evidenceIds":["과거 메시지 ID"]}]}. `+
-      `중요도는 critical, high, normal, low 중 하나. sourceIds는 제공된 메시지 ID만 사용하세요.\n\n`+
-      `[기존 확정/누적 기억]\n${memoryContext()}\n\n[이번에 추가된 실제 대화]\n${JSON.stringify(payload)}`;
+    const payload=rows.map((m,i)=>({id:m.id,order:i,speaker:m.speaker,role:m.role,kind:m.kind,text:m.text.slice(0,18000)}));
+    const guidance="역할: RP 기록 보관자. 다음 대화가 정확히 이어질 수 있도록 원문 기반 서사를 보존한다. 요약 길이를 맞추려 디테일을 삭제하지 말고 원문에 없는 사건·대사·심리를 만들지 않는다.\n\n사건: 한 API 묶음이나 한 메시지가 사건 하나라는 뜻이 아니다. 행동 목적, 갈등 흐름, 원인, 대응, 결과, 관계 변화로 구분한다. 같은 갈등을 해결하는 연결 행동과 반응은 자세히 하나로 묶되, 새로운 갈등·약속·결정·중요한 관계 변화는 별개 사건으로 나눈다. 단순한 장소 이동이나 등장만으로 사건을 분리하지 않는다. 각 사건은 누가, 왜, 무엇을 했고 상대가 어떻게 반응했는지와 결과를 구체적으로 적는다.\n\n순서: 입력 원문의 order는 채팅 출력 순서이지 세계관 날짜가 아니다. events를 사건 근거의 순서대로 반환하고, 한 원문에 여러 사건이 있으면 orderInSource를 0,1,2...로 표시한다. sourceIds에 해당 사건의 정확한 메시지 ID를 적는다. 나중에 밝혀진 과거 사건은 timeType=past로, 현재 사건은 present로 명시한다. 과거 사실이 지금 공개된 일 자체도 중요하면 현재의 공개 사건을 따로 기록한다.\n\n날짜: 실제 채팅 작성 날짜를 이야기 날짜로 쓰지 않는다. 사건 근거에 연월일이 명시되었을 때만 absoluteDate=YYYY-MM-DD, 아니면 null. 다음 날·사흘 뒤 같은 명백한 시간 경과의 첫 사건에만 advanceDays를 사용한다. 위젯·상태창은 참고하지만 본문과 충돌하면 본문 우선. 일시적 속마음이나 계획을 실행된 일로 기록하지 않는다. 모르면 불명으로 남긴다.\n\n감정: 지속적으로 행동에 영향을 미치는 감정을 emotions에서 인물→대상 방향으로 적고 종류·강도·원인·행동 패턴을 보존한다. 일시적 감정이나 해결된 감정은 현재 감정선에 넣지 않는다. 명시적 감정은 explicit, 반복 행동에 근거한 해석은 inferred, 근거가 불충분하면 기록하지 않는다. 보호심이나 끌림을 사랑으로 확대하지 않는다.\n\n관계: relations의 status는 현재 관계 단계와 애정·신뢰 방식, 갈등 해결 방식, 거리감, 주도권, 상호 인식 차이를 가능한 한 구체적으로 포함한다. 지속 중인 관계와 이미 해소된 과거 상태를 구분하고, 최신 확정 변화만 반영한다.\n\n현재 장면: currentState는 이번 입력의 가장 마지막으로 진행된 실제 장면이다. 장소·등장 인물·진행 중 갈등·마지막 상황을 구체적으로 적는다. 이 묶음의 마지막을 전체 스토리의 마지막이라고 단정하지 않는다.\n\n미해결: clues에 진행 중인 갈등, 미이행 약속·합의·조건·일정·복선의 현재 영향 및 위험을 보존한다. 완료·취소된 약속을 현재 유효한 것으로 기록하지 않는다. knowledge에서 누가 무엇을 알고 모르는지 구분한다. 미확인 내면·미래 사건을 확정하지 않는다.\n\n대사와 근거: 고백·협박·약속·선언·관계가 변한 대사는 실제 원문에 있는 표현만 큰따옴표로 인용한다. 의역은 따옴표 없이 간접 서술한다. OOC는 작품 사건이 아니다. 모순 issues는 최신 캐릭터 지문에 실재하는 연속 문자열을 quote로 제시하며 거짓말·반전·오해를 무조건 모순으로 단정하지 않는다.\n\n출력: 글자 수·사건 수 할당량이 없다. 누락을 줄이기 위해 모든 원문 메시지를 확인하되 사건을 억지로 늘리지 않는다. 응답은 코드 블록 없이 JSON 객체 하나. 원문이 없는 항목은 빈 배열, 미상 가족·비밀은 빈 문자열. sourceIds는 실제 제공된 row ID만 사용한다.";
+    const format="{\"events\":[{\"description\":\"배경·행동·반응·결과·영향\",\"timeType\":\"present\",\"orderInSource\":0,\"advanceDays\":0,\"absoluteDate\":null,\"sourceIds\":[\"원문 ID\"],\"importance\":\"normal\"}],\"currentState\":{\"summary\":\"입력 마지막 실제 장면\",\"location\":\"\",\"people\":\"\",\"conflict\":\"\",\"sourceIds\":[\"원문 ID\"]},\"emotions\":[{\"person\":\"\",\"target\":\"\",\"feeling\":\"\",\"reason\":\"\",\"behavior\":\"\",\"certainty\":\"explicit\",\"sourceIds\":[\"원문 ID\"]}],\"facts\":[{\"text\":\"\",\"tag\":\"설정\",\"sourceIds\":[\"원문 ID\"],\"importance\":\"high\"}],\"characters\":[{\"name\":\"\",\"traits\":\"\",\"family\":\"\",\"secrets\":\"\",\"sourceIds\":[\"원문 ID\"]}],\"relations\":[{\"a\":\"\",\"b\":\"\",\"status\":\"현재 관계 유지 방식\",\"sourceIds\":[\"원문 ID\"]}],\"clues\":[{\"title\":\"\",\"detail\":\"현재 영향·미이행 조건\",\"status\":\"open\",\"sourceIds\":[\"원문 ID\"]}],\"knowledge\":[{\"character\":\"\",\"text\":\"\",\"status\":\"knows\",\"sourceIds\":[\"원문 ID\"]}],\"issues\":[{\"quote\":\"실제 최신 지문\",\"reason\":\"\",\"correction\":\"\",\"sourceIds\":[\"최신 원문 ID\"],\"evidenceIds\":[\"과거 원문 ID\"]}]}";
+    return guidance+'\n\nJSON 예시 형식: '+format+
+      '\n\n[기존 누적 기억 — 맥락 참고용, 과거 사건을 중복 생성하지 말 것]\n'+memoryContext()+
+      '\n\n[이번 입력의 전체 대화 원문 — 빠짐없이 확인]\n'+JSON.stringify(payload);
   }
   function pendingChunks(){
     const processed=new Set(roomData.memory.processedIds),groups=messageGroups().filter(g=>!processed.has(g.id));
