@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         제타 AI 기억력 보조 (서사·모순·상기)
 // @namespace    zeta-memory-assistant
-// @version      0.0.5
+// @version      0.0.6
 // @description  과거 대화 로컬 보관, Gemini 서사 기억, 모순 의심 표시, 정정·상기 복사, 기억 검색
 // @updateURL    https://raw.githubusercontent.com/casualJH/zeta-memory-assistant/main/zeta-memory-assistant.user.js
 // @downloadURL  https://raw.githubusercontent.com/casualJH/zeta-memory-assistant/main/zeta-memory-assistant.user.js
@@ -30,11 +30,13 @@
   'use strict';
   if (window.__zetaMemoryAssistantV1) return;
   window.__zetaMemoryAssistantV1 = true;
-  const VERSION = '0.0.5';
+  const VERSION = '0.0.6';
   const DB_NAME = 'zeta-memory-assistant-db-v1';
   const UUID = /^[0-9a-f]{8}-(?:[0-9a-f]{4}-){3}[0-9a-f]{12}$/i;
   const CHANNEL = 'zmm-' + Array.from(crypto.getRandomValues(new Uint8Array(12)), n => n.toString(16).padStart(2, '0')).join('');
-  const BASE_MODEL = 'gemini-2.5-flash';
+  const BASE_MODEL = 'gemini-3.1-flash-lite';
+  const RECOMMENDED_MODELS = ['gemini-3.1-flash-lite','gemini-3.5-flash-lite','gemini-2.5-flash-lite','gemini-2.5-flash'];
+  const MODEL_PRICES = {'gemini-3.1-flash-lite':[0.25,1.50],'gemini-3.5-flash-lite':[0.30,2.50],'gemini-2.5-flash-lite':[0.10,0.40],'gemini-2.5-flash':[0.30,2.50]};
   const MAX_CHUNK = 15000;
   const SAFETY = ['HARM_CATEGORY_HARASSMENT','HARM_CATEGORY_HATE_SPEECH','HARM_CATEGORY_SEXUALLY_EXPLICIT','HARM_CATEGORY_DANGEROUS_CONTENT']
     .map(category => ({category,threshold:'BLOCK_NONE'}));
@@ -48,7 +50,8 @@
   let msgMap=new Map(), analysisBusy=false, analysisStop=false, syncBusy=false, syncEpoch=0;
   let pageButton=null, panel=null, content=null, note=null;
   let tab='home', ui={edit:null,searchResults:[],searchAnswer:'',searchQuestion:'',previewSource:null,summaryLength:'normal',lastOutput:'',buttonPos:null,dragged:false};
-  let apiSettings={auto:true,model:BASE_MODEL,inputRate:0.30,outputRate:2.50};
+  let apiSettings={auto:true,model:BASE_MODEL,inputRate:0.25,outputRate:1.50};
+  let availableModels=[],modelFetchNote='아래 추천 모델 중 선택하거나 API 키로 모델 목록을 불러오세요.';
   let lastLiveSync=0, latestTimer=0, updateTimer=0, currentBridgeRoom=null;
   let batchQueue=Promise.resolve();
   let runtimeStatus='대화방을 열어 주세요.';
@@ -436,6 +439,56 @@
     try{const v=GM_getValue('zmm-settings',{});return v&&typeof v==='object'?v:{};}catch{return{};}
   }
   function saveSettings(){GM_setValue('zmm-settings',{auto:apiSettings.auto,model:apiSettings.model,inputRate:apiSettings.inputRate,outputRate:apiSettings.outputRate});}
+  function modelLabel(model){
+    const id=String(model.id||'');
+    const lite=/flash[- ]?lite/i.test(id+' '+(model.label||''));
+    const recommended=RECOMMENDED_MODELS.includes(id);
+    return (lite?'★ ':'')+(model.label&&model.label.toLowerCase()!==id.toLowerCase()?model.label+' · ':'')+id+(recommended?' · 추천':'');
+  }
+  function modelChoices(){
+    const merged=new Map(RECOMMENDED_MODELS.map(id=>[id,{id,label:''}]));
+    for(const m of availableModels)merged.set(m.id,m);
+    if(!merged.has(apiSettings.model))merged.set(apiSettings.model,{id:apiSettings.model,label:''});
+    return [...merged.values()].sort((a,b)=>{
+      const pa=RECOMMENDED_MODELS.indexOf(a.id),pb=RECOMMENDED_MODELS.indexOf(b.id);
+      if(pa>=0||pb>=0)return (pa<0?999:pa)-(pb<0?999:pb);
+      return a.id.localeCompare(b.id,'en',{numeric:true});
+    });
+  }
+  function apiGetModels(key,pageToken=''){
+    const url='https://generativelanguage.googleapis.com/v1beta/models?pageSize=100'+(pageToken?'&pageToken='+encodeURIComponent(pageToken):'');
+    return new Promise((resolve,reject)=>GM_xmlhttpRequest({
+      method:'GET',url,headers:{'x-goog-api-key':key},timeout:25000,
+      onload:r=>{
+        let body;try{body=JSON.parse(r.responseText||'{}');}catch{return reject(new Error('모델 목록 응답 해석 실패'));}
+        if(r.status!==200)return reject(new Error('Google API '+r.status+': '+truncate(body.error?.message||'',180)));
+        resolve(body);
+      },onerror:()=>reject(new Error('모델 목록 네트워크 오류')),
+      ontimeout:()=>reject(new Error('모델 목록 요청 시간 초과'))
+    }));
+  }
+  async function refreshModels(){
+    const key=getApiKey();if(!key){setStatus('먼저 API 키를 저장해 주세요.');return;}
+    modelFetchNote='모델 목록 불러오는 중…';render();
+    try{
+      let token='',pages=0;const items=[];
+      do{
+        const data=await apiGetModels(key,token);
+        items.push(...safeArray(data.models));
+        token=typeof data.nextPageToken==='string'?data.nextPageToken:'';
+      }while(token&&++pages<4);
+      availableModels=items.filter(m=>m&&Array.isArray(m.supportedGenerationMethods)&&m.supportedGenerationMethods.includes('generateContent'))
+        .map(m=>({id:String(m.name||'').replace(/^models\//,''),label:String(m.displayName||'')}))
+        .filter(m=>/^gemini-/i.test(m.id)&&!/(tts|image|embed|native-audio|live|robotics|computer-use|aqa|transcribe|nano-banana|omni|veo|latest)/i.test(m.id))
+        .sort((a,b)=>a.id.localeCompare(b.id,'en',{numeric:true}));
+      modelFetchNote='이 API 키에서 텍스트 생성 요청을 지원하는 '+availableModels.length+'개 모델 확인됨. 무료 사용 가능 여부 및 한도는 Google AI Studio에서 확인하세요.';
+      setStatus('모델 목록 불러오기 완료 · '+availableModels.length+'개');
+    }catch(err){
+      modelFetchNote='목록 요청 실패: '+String(err.message||err)+' · 추천 모델 선택 및 직접 입력은 계속 사용할 수 있습니다.';
+      setStatus(modelFetchNote);
+    }
+    render();
+  }
   function cleanJSON(text){
     let s=String(text||'').trim();
     if(s.startsWith('```'))s=s.replace(/^```(?:json)?\s*/i,'').replace(/\s*```$/,'');
@@ -823,7 +876,15 @@
     return `${cardHeading('API 및 저장 설정','Gemini API 키는 Tampermonkey 저장소에 보관하고 백업 JSON에는 포함하지 않습니다.')}
       <label>Gemini API 키 <input id="zmm-apikey" type="password" autocomplete="off" placeholder="${getApiKey()?'저장된 키 있음 · 변경하려면 새 키 입력':'Google AI Studio API 키'}"></label>
       <div class="zmm-row"><button data-act="save-key">API 키 저장</button><button data-act="clear-key">API 키 삭제</button></div>
-      <label>Gemini 모델 <input id="zmm-model" value="${esc(apiSettings.model)}" placeholder="${BASE_MODEL}" autocomplete="off"></label>
+      <h4>Gemini 모델 선택</h4>
+      <p class="zmm-muted">무료 API 이용자를 위해 Flash-Lite를 먼저 표시합니다. ★ 표시는 가벼운 모델 추천이며, 무료 사용 가능을 보장하지는 않습니다.</p>
+      <div class="zmm-row"><button data-act="load-models">내 API 키의 모델 목록 불러오기</button></div>
+      <p class="zmm-muted">${esc(modelFetchNote)}</p>
+      <label>모델 선택 <select id="zmm-model-select" data-field="modelSelect">
+      ${modelChoices().map(m=>`<option value="${esc(m.id)}" ${m.id===apiSettings.model?'selected':''}>${esc(modelLabel(m))}</option>`).join('')}
+      </select></label>
+      <label>모델 ID 직접 입력 (선택 사항) <input id="zmm-model" value="${esc(apiSettings.model)}" placeholder="${BASE_MODEL}" autocomplete="off"></label>
+      <p class="zmm-muted">목록에서 모델을 고르면 위 입력칸이 바뀝니다. 원하는 모델 ID를 직접 입력해 저장할 수도 있습니다. 모델이 목록에 있어도 무료 등급에서 호출 가능한지는 계정에 따라 달라집니다.</p>
       <label class="zmm-line">새 대화 자동 분석 <input type="checkbox" data-field="auto" ${apiSettings.auto?'checked':''}></label>
       <div class="zmm-info">검열 느슨: <strong>항상 켬</strong> · 지원되는 안전 카테고리의 API 차단 임곗값을 BLOCK_NONE으로 고정합니다. Google의 기타 정책 제한은 유지됩니다.</div>
       <h4>API 사용량 (이 스크립트에서 기록된 호출)</h4>
@@ -1034,6 +1095,7 @@
       else setStatus('새 API 키를 입력해 주세요.');return;
     }
     if(act==='clear-key'){if(confirm('저장된 Gemini API 키를 삭제할까요?')){GM_setValue('zmm-api-key','');setStatus('API 키 삭제됨');render();}return;}
+    if(act==='load-models'){await refreshModels();return;}
     if(act==='save-settings'){
       const model=$('#zmm-model')?.value.trim()||BASE_MODEL;
       if(!/^[a-z0-9][a-z0-9._-]{2,70}$/i.test(model))return setStatus('모델 이름 형식이 올바르지 않습니다.');
@@ -1206,6 +1268,15 @@
       const target=e.target;
       if(target.dataset.field==='auto'){apiSettings.auto=target.checked;saveSettings();setStatus(apiSettings.auto?'자동 분석 켬':'자동 분석 끔 · 로컬 수집은 유지');if(apiSettings.auto&&roomData?.fullyLoaded&&getApiKey())scheduleAnalysis(900);}
       if(target.dataset.field==='summaryLength'){ui.summaryLength=target.value;ui.lastOutput='';}
+      if(target.dataset.field==='modelSelect'){
+        const id=target.value;
+        const input=panel.querySelector('#zmm-model');if(input)input.value=id;
+        const rates=MODEL_PRICES[id];
+        if(rates){const inputRate=panel.querySelector('#zmm-in-rate'),outputRate=panel.querySelector('#zmm-out-rate');
+          if(inputRate)inputRate.value=String(rates[0]);
+          if(outputRate)outputRate.value=String(rates[1]);}
+        setStatus('선택: '+id+' · 아래 모델·요금 설정 저장을 눌러 적용하세요.');
+      }
       if(target.dataset.field==='importance'){
         const x=safeUiItem(target.dataset.kind,target.dataset.id);if(x){x.importance=normalizeImportance(target.value);x.manual=true;await saveRoom();setStatus('기억 우선순위 저장됨');}
       }
