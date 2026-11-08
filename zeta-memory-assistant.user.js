@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         제타 AI 기억력 보조 (서사·모순·상기)
 // @namespace    zeta-memory-assistant
-// @version      0.0.9
+// @version      0.0.10
 // @description  과거 대화 로컬 보관, Gemini 서사 기억, 모순 의심 표시, 정정·상기 복사, 기억 검색
 // @updateURL    https://raw.githubusercontent.com/casualJH/zeta-memory-assistant/main/zeta-memory-assistant.user.js
 // @downloadURL  https://raw.githubusercontent.com/casualJH/zeta-memory-assistant/main/zeta-memory-assistant.user.js
@@ -30,7 +30,7 @@
   'use strict';
   if (window.__zetaMemoryAssistantV1) return;
   window.__zetaMemoryAssistantV1 = true;
-  const VERSION = '0.0.9';
+  const VERSION = '0.0.10';
   const DB_NAME = 'zeta-memory-assistant-db-v1';
   const UUID = /^[0-9a-f]{8}-(?:[0-9a-f]{4}-){3}[0-9a-f]{12}$/i;
   const CHANNEL = 'zmm-' + Array.from(crypto.getRandomValues(new Uint8Array(12)), n => n.toString(16).padStart(2, '0')).join('');
@@ -138,6 +138,10 @@
     if(ta!==tb)return ta-tb;
     return String(a.messageId).localeCompare(String(b.messageId))||a.contentIndex-b.contentIndex;
   });}
+  // Exclusion applies only to Gemini analysis; original messages and backups remain intact.
+  function excludedFromAnalysis(group){
+    return group.rows.some(row=>/ooc\s*:|요약/i.test(String(row.text||'')));
+  }
   function messageGroups(){
     const groups=new Map();
     for(const m of orderedMessages()){
@@ -742,7 +746,7 @@
       '\n\n[이번 입력의 전체 대화 원문 — 빠짐없이 확인]\n'+JSON.stringify(payload);
   }
   function pendingChunks(){
-    const processed=new Set(roomData.memory.processedIds),groups=messageGroups().filter(g=>!processed.has(g.id));
+    const processed=new Set(roomData.memory.processedIds),groups=messageGroups().filter(g=>!processed.has(g.id)&&!excludedFromAnalysis(g));
     const out=[];let batch=[],chars=0;
     for(const group of groups){
       const add=group.rows.reduce((n,m)=>n+m.text.length,0);
@@ -811,7 +815,9 @@
   function homeMarkup(){
     if(!roomData)return '<div class="zmm-empty">채팅방 ID를 아직 감지하지 못했습니다. 제타 채팅방에서 새로고침해 주세요.<div class="zmm-row"><button data-act="diagnose">연결 재확인</button></div><small>연결 방식: '+esc(bridgeDiagnostics.mode)+' · 인증 확인: '+(bridgeDiagnostics.authorization?'예':'아니요')+'</small></div>';
     const m=roomData.memory,processed=new Set(m.processedIds);
-    const pending=messageGroups().filter(x=>!processed.has(x.id)).length;
+    const groups=messageGroups();
+    const excluded=groups.filter(excludedFromAnalysis).length;
+    const pending=groups.filter(x=>!processed.has(x.id)&&!excludedFromAnalysis(x)).length;
     const usage=roomData.usage||{};
     return `${cardHeading('대화 및 기억 현황',`채팅방 ${activeRoom.slice(0,8)}… · ${roomData.fullyLoaded?'전체 수집 완료':'전체 대화 미확인'}`)}
       <div class="zmm-metrics">
@@ -823,6 +829,7 @@
       <div class="zmm-row"><button class="zmm-main" data-act="full">과거 대화 전체 불러오기</button><button data-act="latest">최신 대화 확인</button></div>
       <div class="zmm-row"><button class="zmm-main" data-act="analyze">${analysisBusy?'분석 중…':'미분석 대화 요약'}</button><button data-act="stop">중지</button></div>
       <p class="zmm-muted">최초 1회 전체 수집이 완료되어야 분석할 수 있습니다. 이후에는 추가된 턴만 분석합니다. 자동 분석이 켜져 있어도 API 키가 없으면 실행하지 않습니다.</p>
+      <p class="zmm-muted">분석 제외: ${excluded}턴 · 메시지에 'ooc:' 또는 '요약'이 포함되면 해당 메시지 전체를 Gemini 분석에서 제외합니다. 원문·JSON 백업에는 보존됩니다.</p>
       <label class="zmm-line"><span>새 대화 자동 분석</span><input id="zmm-auto-home" type="checkbox" data-field="auto" ${apiSettings.auto?'checked':''}></label>
       <div class="zmm-info">${esc(roomData.lastSync?'전체 수집 완료 시각(기기 기준): '+new Date(roomData.lastSync).toLocaleString('ko-KR'):'전체 수집 전입니다. 채팅방 새로고침 후 수집을 시작하세요.')}</div>
       <div class="zmm-row"><button data-act="tab" data-tab="conflicts">모순 정정</button><button data-act="tab" data-tab="remind">전체 서사 상기</button></div>
