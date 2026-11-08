@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         제타 AI 기억력 보조 (서사·모순·상기)
 // @namespace    zeta-memory-assistant
-// @version      0.1.2
+// @version      0.1.3
 // @description  과거 대화 로컬 보관, Gemini 서사 기억, 모순 의심 표시, 정정·상기 복사, 기억 검색
 // @updateURL    https://raw.githubusercontent.com/casualJH/zeta-memory-assistant/main/zeta-memory-assistant.user.js
 // @downloadURL  https://raw.githubusercontent.com/casualJH/zeta-memory-assistant/main/zeta-memory-assistant.user.js
@@ -30,7 +30,7 @@
   'use strict';
   if (window.__zetaMemoryAssistantV1) return;
   window.__zetaMemoryAssistantV1 = true;
-  const VERSION = '0.1.2';
+  const VERSION = '0.1.3';
   const DB_NAME = 'zeta-memory-assistant-db-v1';
   const UUID = /^[0-9a-f]{8}-(?:[0-9a-f]{4}-){3}[0-9a-f]{12}$/i;
   const CHANNEL = 'zmm-' + Array.from(crypto.getRandomValues(new Uint8Array(12)), n => n.toString(16).padStart(2, '0')).join('');
@@ -49,7 +49,7 @@
   let dbPromise, mounted=false, bridgeReady=false, activeRoom=null, roomData=null;
   let msgMap=new Map(), analysisBusy=false, analysisStop=false, syncBusy=false, syncEpoch=0;
   let pageButton=null, panel=null, content=null, note=null;
-  let tab='home', ui={edit:null,searchResults:[],searchAnswer:'',searchQuestion:'',previewSource:null,summaryLength:'normal',lastOutput:'',buttonPos:null,dragged:false};
+  let tab='home', ui={edit:null,searchResults:[],searchAnswer:'',searchQuestion:'',previewSource:null,summaryLength:'normal',lastOutput:'',reminderCache:null,reminderBusy:false,buttonPos:null,dragged:false};
   let apiSettings={auto:true,model:BASE_MODEL,billingMode:'free',inputRate:0.25,outputRate:1.50};
   let availableModels=[],modelFetchNote='아래 추천 모델 중 선택하거나 API 키로 모델 목록을 불러오세요.';
   let lastLiveSync=0, latestTimer=0, updateTimer=0, currentBridgeRoom=null;
@@ -919,36 +919,145 @@
       <h4>근거 및 검색 결과</h4>
       ${(ui.searchResults.length?ui.searchResults.map(r=>`<article class="zmm-item"><strong>${esc(r.heading)}</strong><p>${esc(truncate(r.text,900))}</p>${sourceButtons(r.sourceIds)}</article>`).join(''):'<div class="zmm-empty">검색어를 입력하고 검색해 주세요.</div>')}`;
   }
-  function reminderText(mode='normal'){
+  function reminderText(mode='detailed'){
     const m=roomData?.memory;if(!m)return '';
-    const critical=m.facts.filter(f=>f.importance==='critical'||f.manual),important=m.facts.filter(f=>f.importance==='high');
-    const maxEvents=mode==='brief'?25:mode==='normal'?120:10000;
-    const maxChars=mode==='brief'?2800:4500; // Copied output capped at 4,500; saved memory unchanged.
-    let parts=['[과거 서사 상기]','이 자료는 실제 대화 및 사용자가 직접 지정한 설정을 바탕으로 한 참고 기록입니다. 기록에 없는 사건·대사·설정을 추가하지 마세요.'];
+    const parts=['[과거 서사 상기]','실제 대화 및 사용자 설정만 근거로 작성된 연속성 기록입니다. 확인되지 않은 사건·대사·설정을 새로 만들지 마세요.'];
     if(m.pinnedText.trim())parts.push('\n■ 사용자 고정 지침\n'+m.pinnedText.trim());
-    if(critical.length)parts.push('\n■ 확정·핵심 설정\n'+critical.map(f=>'- '+f.text).join('\n'));
-    const chronicle=orderedTimeline();
-    const eligible=mode==='brief'?chronicle.filter(x=>x.importance!=='low'):chronicle;
-    const timeline=eligible.length<=maxEvents?eligible:
-      [...eligible.slice(0,Math.floor(maxEvents/5)),...eligible.slice(-Math.ceil(maxEvents*4/5))];
+    const timeline=orderedTimeline();
     if(timeline.length){
-      const byDay=new Map();for(const ev of timeline){if(!byDay.has(ev.label))byDay.set(ev.label,[]);byDay.get(ev.label).push(ev.description);}
-      parts.push('\n■ 날짜별 서사\n'+[...byDay].map(([label,events])=>`${label}\n${events.map(x=>'- '+x).join('\n')}`).join('\n\n'));
+      const byDay=new Map();
+      for(const ev of timeline){const label=ev.label||'날짜 불명';if(!byDay.has(label))byDay.set(label,[]);byDay.get(label).push(ev.description);}
+      parts.push('\n■ 날짜별 전체 서사\n'+[...byDay].map(([label,events])=>label+'\n'+events.map(x=>'- '+x).join('\n')).join('\n\n'));
     }
     if(m.currentState?.summary)parts.push('\n■ 현재 진행 중인 장면\n'+m.currentState.summary);
-    if(m.emotions.length)parts.push('\n■ 현재 감정선\n'+m.emotions.map(e=>`- ${e.person} → ${e.target}: ${e.feeling} / 이유: ${e.reason} / 행동: ${e.behavior}`).join('\n'));
-    if(m.characters.length)parts.push('\n■ 인물별 기억\n'+m.characters.map(c=>`- ${c.name}: ${[c.traits,c.family&&'가족: '+c.family,mode!=='brief'&&c.secrets&&'비밀: '+c.secrets].filter(Boolean).join(' / ')}`).join('\n'));
-    if(m.relations.length)parts.push('\n■ 현재 인물 관계\n'+m.relations.map(r=>`- ${r.a} ↔ ${r.b}: ${r.status}`).join('\n'));
-    const open=m.clues.filter(x=>x.status!=='solved');
-    if(open.length)parts.push('\n■ 미해결 사건·복선\n'+open.map(c=>`- ${c.title}: ${c.detail}`).join('\n'));
-    if(mode!=='brief'&&important.length)parts.push('\n■ 기타 중요 설정\n'+important.map(x=>'- '+x.text).join('\n'));
-    if(mode==='detailed'){
-      if(m.knowledge.length)parts.push('\n■ 인물별 지식\n'+m.knowledge.map(x=>`- ${x.character}: ${x.text} (${x.status})`).join('\n'));
-      if(m.facts.filter(x=>x.importance==='normal').length)parts.push('\n■ 기타 기억\n'+m.facts.filter(x=>x.importance==='normal').map(x=>'- '+x.text).join('\n'));
+    if(m.emotions.length)parts.push('\n■ 현재 감정선\n'+m.emotions.map(e=>'- '+e.person+' → '+e.target+': '+e.feeling+' / 이유: '+e.reason+' / 행동: '+e.behavior).join('\n'));
+    if(m.characters.length)parts.push('\n■ 인물별 기억\n'+m.characters.map(c=>'- '+c.name+': '+[c.traits,c.family&&'가족: '+c.family,c.secrets&&'비밀: '+c.secrets].filter(Boolean).join(' / ')).join('\n'));
+    if(m.relations.length)parts.push('\n■ 현재 인물 관계\n'+m.relations.map(r=>'- '+r.a+' ↔ '+r.b+': '+r.status).join('\n'));
+    if(m.clues.length)parts.push('\n■ 복선·미해결 및 해결된 조건\n'+m.clues.map(c=>'- '+c.title+' ('+c.status+'): '+c.detail).join('\n'));
+    if(m.facts.length)parts.push('\n■ 확정 설정 및 기타 사실\n'+m.facts.map(f=>'- '+(f.tag||'설정')+': '+f.text).join('\n'));
+    if(m.knowledge.length)parts.push('\n■ 인물별 정보 공개 범위\n'+m.knowledge.map(x=>'- '+x.character+': '+x.text+' ('+x.status+')').join('\n'));
+    return parts.join('\n'); // Detailed archive has no text-length or event-count limit.
+  }
+  function reminderCacheKey(mode){
+    const m=roomData?.memory;
+    return JSON.stringify([activeRoom,mode,m?.updatedAt,m?.timeline.length,m?.facts.length,m?.pinnedText]);
+  }
+  function memoryPartsForSummary(){
+    const m=roomData?.memory;
+    if(!m)return [];
+    const parts=[];
+    const put=(category,text)=>{if(String(text||'').trim())parts.push(category+': '+String(text).trim());};
+    if(m.pinnedText)put('사용자 고정 지침',m.pinnedText);
+    for(const x of orderedTimeline())put('사건 '+(x.label||'날짜 미상'),x.description);
+    if(m.currentState?.summary)put('현재 장면',m.currentState.summary);
+    for(const x of m.characters)put('인물 '+x.name,[x.traits,x.family&&'가족 '+x.family,x.secrets&&'비밀 '+x.secrets].filter(Boolean).join(' / '));
+    for(const x of m.emotions)put('감정 '+x.person+' → '+x.target,[x.feeling,x.reason,x.behavior].filter(Boolean).join(' / '));
+    for(const x of m.relations)put('관계 '+x.a+' ↔ '+x.b,x.status);
+    for(const x of m.clues)put('미해결·복선 '+x.title+' ['+x.status+']',x.detail);
+    for(const x of m.facts)put('설정 '+(x.tag||''),x.text);
+    for(const x of m.knowledge)put('지식 '+x.character+' ['+x.status+']',x.text);
+    return parts;
+  }
+  function chunkSummaryParts(parts,max=19000){
+    const chunks=[];let current='',count=0;
+    const add=part=>{
+      if(current&&current.length+part.length+1>max){chunks.push(current);current='';}
+      current+=(current?'\n':'')+part;
+    };
+    for(const part of parts){
+      if(part.length>max){
+        // This concerns input-only chunking, not shortening the user's archived memories.
+        for(let i=0;i<part.length;i+=max-200)add(part.slice(i,i+max-200));
+      }else add(part);
+      count++;
     }
-    let text=parts.join('\n');
-    if(text.length>maxChars)text=text.slice(0,maxChars-95)+'\n\n[길이 제한으로 뒤쪽 일부 내용이 생략됨. 더 자세한 기록은 타임라인·기억 검색에서 확인할 수 있음]';
-    return text;
+    if(current)chunks.push(current);
+    return chunks;
+  }
+  function summaryRules(mode){
+    const brief=mode==='brief';
+    return '역할: RP 서사 아카이비스트. 아래 기록을 읽고 새로운 RP에서 이야기의 연속성을 복원할 한국어 요약문을 작성한다. '+
+      '지나친 축약으로 사건의 원인·결과·인물·관계 변화·현재 유효한 약속·조건·갈등이 사라지지 않도록 한다. '+
+      '모든 시기와 장면을 검토하며 앞부분만 담고 뒷부분을 버리지 않는다. '+
+      '다양한 사건을 글자 수 때문에 단순 삭제하지 말고 같은 목적·갈등을 중심으로 의미 있게 통합하여 다시 서술한다. '+
+      '시간순 실제 사건, 현재 감정선, 관계 구조, 현재 장면, 미해결 변수, 확정된 사실을 우선 보존한다. '+
+      '회상과 실제 사건을 구분하고 인물별 발언·감정을 혼동하지 않는다. 인용 대사는 실제 제공된 문구만 그대로 사용한다. '+
+      '새 사건이나 추정 설정 창작 금지. 날짜를 지어내지 않는다. '+
+      (brief?'간략 버전: 핵심과 현재 상태를 중심으로 약 1,700~2,700자, 반드시 4,500자 이하. ':
+        '표준 버전: 서사의 전 기간을 균형 있게 다루고 구체적 인과관계와 유효한 조건을 우선 담아 약 4,000~4,400자, 반드시 4,500자 이하. ')+
+      '문장은 요점과 관계가 분명하도록 작성하며 불필요한 수식어를 줄인다. '+
+      '최종 결과를 반환하기 전에 공백과 줄바꿈을 포함한 길이를 점검한다. '+
+      '응답은 JSON {"summary":"요약 본문"} 한 개만 작성하고 안내문·코드블록·생략 표시를 출력하지 않는다.';
+  }
+  async function generateReminder(mode){
+    if(mode==='detailed')return reminderText('detailed');
+    if(!getApiKey())throw new Error('간략·표준 요약에는 Gemini API 키가 필요합니다. 설정에서 API 키를 입력해 주세요.');
+    const key=reminderCacheKey(mode);
+    if(ui.reminderCache?.key===key)return ui.reminderCache.text;
+    const room=activeRoom,parts=memoryPartsForSummary();
+    if(!parts.length)throw new Error('요약할 저장 기억이 없습니다.');
+    const chunks=chunkSummaryParts(parts);
+    const rules=summaryRules(mode);
+    let input='';
+    // For longer archives, build a sequence of intermediate summaries rather than discarding the end.
+    if(chunks.length===1)input=chunks[0];
+    else{
+      const summaries=[];
+      for(let i=0;i<chunks.length;i++){
+        if(room!==activeRoom)throw new Error('채팅방이 변경되어 요약을 중단했습니다.');
+        setStatus('전체 서사 요약 자료 정리 중 · '+(i+1)+'/'+chunks.length);
+        const data=await askGemini('다음은 전체 서사 중 '+(i+1)+'/'+chunks.length+' 구간입니다. 중요 사건·원인·결과·확정 설정·감정선·현재 유효 조건을 실제 원문 근거로 보존하세요. 마지막 구간이 아니면 최종 현재 상태라 단정하지 마세요. JSON {"summary":"이 구간의 충실한 중간 요약"}만 출력.\n'+chunks[i],4200,room);
+        const part=String(data?.summary||'').trim();
+        if(!part)throw new Error('중간 서사 요약이 비어 있습니다.');
+        summaries.push('구간 '+(i+1)+'/'+chunks.length+'\n'+part);
+      }
+      input=summaries.join('\n\n');
+      // Collapse large intermediate notes in stages so that the entire story is considered.
+      while(input.length>22000){
+        const segments=chunkSummaryParts(input.split('\n').filter(Boolean),17500);
+        if(segments.length<=1)break;
+        const next=[];
+        for(let i=0;i<segments.length;i++){
+          const result=await askGemini('연속 서사의 중간 기록 '+(i+1)+'/'+segments.length+'을 다시 정리합니다. 사건·날짜·인과·관계·미해결 조건을 유지하며 반복만 통합하세요. JSON {"summary":"정리된 내용"}만 출력.\n'+segments[i],4200,room);
+          if(!String(result?.summary||'').trim())throw new Error('중간 기록 통합 실패');
+          next.push(String(result.summary));
+        }
+        const joined=next.join('\n\n');
+        if(joined.length>=input.length)throw new Error('기록이 너무 길어 추가 압축이 필요합니다. 일부를 잘라내지 않고 중단했습니다.');
+        input=joined;
+      }
+    }
+    let draft='';
+    for(let attempt=0;attempt<3;attempt++){
+      if(room!==activeRoom)throw new Error('채팅방이 변경되어 요약을 중단했습니다.');
+      setStatus(attempt?'서사 요약 길이 재조정 중 · '+(attempt+1)+'/3':'저장된 서사 전체를 '+(mode==='brief'?'간략':'표준')+' 분량으로 요약 중…');
+      const prompt=attempt?
+        rules+'\n다음 초안의 모든 시기와 확정 정보를 균형 있게 유지하며 중복 서술을 통합해 반드시 4,500자 이내로 다시 작성하세요. 초안은 '+draft.length+'자입니다. 텍스트 뒤쪽을 단순히 자르지 마세요.\n[초안]\n'+draft:
+        rules+'\n[전체 서사 참고 기록]\n'+input;
+      const result=await askGemini(prompt,6200,room);
+      draft=String(result?.summary||'').trim();
+      if(!draft)throw new Error('Gemini가 빈 요약을 반환했습니다.');
+      if(draft.length<=4500){
+        ui.reminderCache={key,text:draft};
+        return draft;
+      }
+    }
+    throw new Error('Gemini가 4,500자 이내 요약을 완성하지 못했습니다. 뒷부분을 잘라내지 않고 복사를 중단했습니다. 다시 시도해 주세요.');
+  }
+  async function handleReminderAction(copy){
+    if(ui.reminderBusy)return setStatus('서사 상기문을 생성하고 있습니다.');
+    ui.reminderBusy=true;
+    const mode=ui.summaryLength,room=activeRoom;
+    try{
+      const output=await generateReminder(mode);
+      if(room!==activeRoom)return;
+      ui.lastOutput=output;
+      ui.lastOutputMode=mode;
+      if(copy)await clip(output);
+      else setStatus('서사 상기문 생성 완료 · '+output.length.toLocaleString()+'자');
+      render();
+    }catch(e){setStatus('서사 상기문 생성 실패: '+String(e.message||e));}
+    finally{ui.reminderBusy=false;}
   }
   function correctionsText(issue=null){
     const issues=issue?[issue]:(roomData?.memory.issues||[]).filter(i=>i.status==='open');
@@ -962,13 +1071,13 @@
   function reminderMarkup(){
     return `${cardHeading('전체 서사 상기','정정문과 별도로, 현재까지의 작품 서사를 클립보드에 복사합니다.')}
       <label>상기 분량 <select id="zmm-summary-length" data-field="summaryLength">
-        <option value="brief" ${ui.summaryLength==='brief'?'selected':''}>간략 · 핵심 사건</option>
-        <option value="normal" ${ui.summaryLength==='normal'?'selected':''}>표준 · 날짜별 서사와 관계</option>
-        <option value="detailed" ${ui.summaryLength==='detailed'?'selected':''}>상세 · 4,500자 이내</option>
+        <option value="brief" ${ui.summaryLength==='brief'?'selected':''}>간략 · 핵심 내용 (4,500자 이내)</option>
+        <option value="normal" ${ui.summaryLength==='normal'?'selected':''}>표준 · 약 4,500자</option>
+        <option value="detailed" ${ui.summaryLength==='detailed'?'selected':''}>상세 · 분량 제한 없음</option>
       </select></label>
       <div class="zmm-row"><button class="zmm-main" data-act="copy-reminder">전체 서사 상기 복사</button><button data-act="preview-reminder">미리보기</button></div>
-      <p class="zmm-muted">복사하는 상기문은 공백 포함 최대 4,500자입니다. 저장된 기억은 줄이지 않으며, 복사 때 API를 호출하지 않습니다.</p>
-      ${ui.lastOutput?`<div class="zmm-output"><button data-act="copy-output">미리보기 내용 복사</button><pre>${esc(ui.lastOutput)}</pre></div>`:''}`;
+      <p class="zmm-muted">간략·표준은 저장된 전체 기억을 Gemini가 재요약하므로 API 호출이 발생합니다. 단순히 뒤를 자르지 않습니다. 간략은 4,500자 이내, 표준은 약 4,500자(최대 4,500자)입니다. 상세는 API 호출 없이 모든 기억을 글자 수 제한 없이 출력합니다.</p>
+      ${ui.lastOutput&&ui.lastOutputMode===ui.summaryLength?`<div class="zmm-output"><button data-act="copy-output">미리보기 내용 복사</button><pre>${esc(ui.lastOutput)}</pre></div>`:''}`;
   }
   function priceEstimate(){
     if(apiSettings.billingMode!=='paid'||!roomData)return 0;
@@ -1242,9 +1351,9 @@
     if(act==='copy-one'){const item=roomData.memory.issues.find(x=>x.id===id);if(item){ui.lastOutput=correctionsText(item);await clip(ui.lastOutput);}return;}
     if(act==='local-search'){searchQuestion(false);return;}
     if(act==='ai-search'){searchQuestion(true);return;}
-    if(act==='preview-reminder'){ui.lastOutput=reminderText(ui.summaryLength);render();return;}
-    if(act==='copy-reminder'){clip(reminderText(ui.summaryLength));return;}
-    if(act==='copy-output'){clip(ui.lastOutput);return;}
+    if(act==='preview-reminder'){await handleReminderAction(false);return;}
+    if(act==='copy-reminder'){await handleReminderAction(true);return;}
+    if(act==='copy-output'){if(ui.lastOutput&&ui.lastOutputMode===ui.summaryLength)await clip(ui.lastOutput);else setStatus('현재 분량의 미리보기를 먼저 생성해 주세요.');return;}
     if(act==='save-key'){
       const value=$('#zmm-apikey').value.trim();
       if(value){GM_setValue('zmm-api-key',value);setStatus('Gemini API 키 저장됨');render();}
@@ -1431,7 +1540,7 @@
     panel.addEventListener('change',async e=>{
       const target=e.target;
       if(target.dataset.field==='auto'){apiSettings.auto=target.checked;saveSettings();setStatus(apiSettings.auto?'자동 분석 켬':'자동 분석 끔 · 로컬 수집은 유지');if(apiSettings.auto&&roomData?.fullyLoaded&&getApiKey())scheduleAnalysis(900);}
-      if(target.dataset.field==='summaryLength'){ui.summaryLength=target.value;ui.lastOutput='';}
+      if(target.dataset.field==='summaryLength'){ui.summaryLength=target.value;ui.lastOutput='';ui.lastOutputMode=null;render();}
       if(target.dataset.field==='billingMode'){
         const modelInput=panel.querySelector('#zmm-model');
         ui.pendingModel=modelInput?.value||apiSettings.model;
