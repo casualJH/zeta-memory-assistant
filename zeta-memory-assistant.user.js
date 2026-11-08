@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         제타 기억력 보조
 // @namespace    zeta-memory-assistant
-// @version      0.2.2
+// @version      0.2.3
 // @description  과거 대화 로컬 보관, Gemini 서사 기억, 모순 의심 표시, 정정·상기 복사, 기억 검색
 // @updateURL    https://raw.githubusercontent.com/casualJH/zeta-memory-assistant/main/zeta-memory-assistant.user.js
 // @downloadURL  https://raw.githubusercontent.com/casualJH/zeta-memory-assistant/main/zeta-memory-assistant.user.js
@@ -30,7 +30,7 @@
   'use strict';
   if (window.__zetaMemoryAssistantV1) return;
   window.__zetaMemoryAssistantV1 = true;
-  const VERSION = '0.2.2';
+  const VERSION = '0.2.3';
   const DB_NAME = 'zeta-memory-assistant-db-v1';
   const UUID = /^[0-9a-f]{8}-(?:[0-9a-f]{4}-){3}[0-9a-f]{12}$/i;
   const CHANNEL = 'zmm-' + Array.from(crypto.getRandomValues(new Uint8Array(12)), n => n.toString(16).padStart(2, '0')).join('');
@@ -38,6 +38,7 @@
   const RECOMMENDED_MODELS = ['gemini-3.1-flash-lite','gemini-3.5-flash-lite','gemini-2.5-flash-lite','gemini-2.5-flash'];
   const MODEL_PRICES = {'gemini-3.1-flash-lite':[0.25,1.50],'gemini-3.5-flash-lite':[0.30,2.50],'gemini-2.5-flash-lite':[0.10,0.40],'gemini-2.5-flash':[0.30,2.50]};
   const MAX_CHUNK = 6500;
+  const AUTO_ANALYSIS_MIN_CONVERSATIONS = 10;
   const SAFETY = ['HARM_CATEGORY_HARASSMENT','HARM_CATEGORY_HATE_SPEECH','HARM_CATEGORY_SEXUALLY_EXPLICIT','HARM_CATEGORY_DANGEROUS_CONTENT']
     .map(category => ({category,threshold:'BLOCK_NONE'}));
   const $ = (selector, root=document) => root.querySelector(selector);
@@ -411,7 +412,20 @@
       lastLiveSync=Date.now();sendBridge('latest');
     },ms);
   }
-  function scheduleAnalysis(ms=2500){clearTimeout(updateTimer);updateTimer=setTimeout(()=>{if(apiSettings.auto)analyzePending().catch(e=>setStatus('자동 분석 오류: '+String(e.message||e)));},ms);}
+  function unanalysedConversationCount(){
+    if(!roomData)return 0;
+    const processed=new Set(roomData.memory.processedIds);
+    return messageGroups().filter(group=>!processed.has(group.id)&&!excludedFromAnalysis(group)).length;
+  }
+  function scheduleAnalysis(ms=2500){
+    clearTimeout(updateTimer);
+    updateTimer=setTimeout(()=>{
+      if(!apiSettings.auto||!roomData?.fullyLoaded||!getApiKey()||analysisBusy||syncBusy)return;
+      const pending=unanalysedConversationCount();
+      if(pending<AUTO_ANALYSIS_MIN_CONVERSATIONS)return;
+      analyzePending().catch(e=>setStatus('자동 분석 오류: '+String(e.message||e)));
+    },ms);
+  }
   async function receiveBridgeData(d){
     if(!d||d.tag!=='zmm-page'||d.channel!==CHANNEL)return;
     if(d.room)bridgeDiagnostics.roomSource=d.source||'API 요청';
@@ -882,20 +896,19 @@
   function cardHeading(title,subtitle=''){return `<h3>${esc(title)}</h3>${subtitle?`<p class="zmm-muted">${esc(subtitle)}</p>`:''}`;}
   function homeMarkup(){
     if(!roomData)return '<div class="zmm-empty">채팅방 ID를 아직 감지하지 못했습니다. 제타 채팅방에서 새로고침해 주세요.<div class="zmm-row"><button data-act="diagnose">연결 재확인</button></div><small>연결 방식: '+esc(bridgeDiagnostics.mode)+' · 인증 확인: '+(bridgeDiagnostics.authorization?'예':'아니요')+'</small></div>';
-    const m=roomData.memory,processed=new Set(m.processedIds);
-    const groups=messageGroups();
-    const pending=groups.filter(x=>!processed.has(x.id)&&!excludedFromAnalysis(x)).length;
+    const m=roomData.memory;
+    const pending=unanalysedConversationCount();
     const usage=roomData.usage||{};
     return `${cardHeading('대화 및 기억 현황',`채팅방 ${activeRoom.slice(0,8)}… · ${roomData.fullyLoaded?'전체 수집 완료':'전체 대화 미확인'}`)}
       <div class="zmm-metrics">
         <div><strong>${msgMap.size.toLocaleString()}</strong><span>원문 항목</span></div>
         <div><strong>${m.timeline.length}</strong><span>서사 사건</span></div>
-        <div><strong>${pending}</strong><span>미분석 턴</span></div>
+        <div><strong>${pending}</strong><span>미분석 대화</span></div>
         <div><strong>${m.issues.filter(i=>i.status==='open').length}</strong><span>모순 의심</span></div>
       </div>
       <div class="zmm-row"><button class="zmm-main" data-act="full">과거 대화 전체 불러오기</button><button data-act="latest">최신 대화 확인</button></div>
       <div class="zmm-row"><button class="zmm-main" data-act="analyze">${analysisBusy?'분석 중…':'미분석 대화 요약'}</button><button data-act="stop">중지</button></div>
-      <p class="zmm-muted">최초 1회 전체 수집이 완료되어야 분석할 수 있습니다. 이후에는 추가된 턴만 분석합니다. 자동 분석이 켜져 있어도 API 키가 없으면 실행하지 않습니다.</p>
+      <p class="zmm-muted">최초 1회 전체 수집이 완료되어야 분석할 수 있습니다. 자동 분석은 미분석 대화가 10개 이상 쌓이면 실행되며, 수동 요약은 개수에 관계없이 실행할 수 있습니다. API 키가 없으면 자동 분석하지 않습니다.</p>
       <label class="zmm-line"><span>새 대화 자동 분석</span><input id="zmm-auto-home" type="checkbox" data-field="auto" ${apiSettings.auto?'checked':''}></label>
       <div class="zmm-info">${esc(roomData.lastSync?'전체 수집 완료 시각(기기 기준): '+new Date(roomData.lastSync).toLocaleString('ko-KR'):'전체 수집 전입니다. 채팅방 새로고침 후 수집을 시작하세요.')}</div>
       <div class="zmm-row"><button data-act="tab" data-tab="conflicts">모순 정정</button><button data-act="tab" data-tab="remind">전체 서사 상기</button></div>
