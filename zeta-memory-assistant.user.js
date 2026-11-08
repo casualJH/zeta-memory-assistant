@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         제타 AI 기억력 보조 (서사·모순·상기)
 // @namespace    zeta-memory-assistant
-// @version      0.0.8
+// @version      0.0.9
 // @description  과거 대화 로컬 보관, Gemini 서사 기억, 모순 의심 표시, 정정·상기 복사, 기억 검색
 // @updateURL    https://raw.githubusercontent.com/casualJH/zeta-memory-assistant/main/zeta-memory-assistant.user.js
 // @downloadURL  https://raw.githubusercontent.com/casualJH/zeta-memory-assistant/main/zeta-memory-assistant.user.js
@@ -30,7 +30,7 @@
   'use strict';
   if (window.__zetaMemoryAssistantV1) return;
   window.__zetaMemoryAssistantV1 = true;
-  const VERSION = '0.0.8';
+  const VERSION = '0.0.9';
   const DB_NAME = 'zeta-memory-assistant-db-v1';
   const UUID = /^[0-9a-f]{8}-(?:[0-9a-f]{4}-){3}[0-9a-f]{12}$/i;
   const CHANNEL = 'zmm-' + Array.from(crypto.getRandomValues(new Uint8Array(12)), n => n.toString(16).padStart(2, '0')).join('');
@@ -61,6 +61,7 @@
 
   function defaultMemory() {
     return {timeline:[],characters:[],relations:[],clues:[],facts:[],issues:[],knowledge:[],
+      emotions:[],currentState:null,
       dayIndex:1,absoluteDate:null,processedIds:[],pinnedText:'',updatedAt:null};
   }
   function defaultRoom(room) {
@@ -71,7 +72,8 @@
   function ensureMemory(mem) {
     const d=defaultMemory();
     if (!mem || typeof mem!=='object') return d;
-    for (const k of ['timeline','characters','relations','clues','facts','issues','knowledge','processedIds']) d[k]=safeArray(mem[k]);
+    for (const k of ['timeline','characters','relations','clues','facts','issues','knowledge','emotions','processedIds']) d[k]=safeArray(mem[k]);
+    d.currentState=mem.currentState&&typeof mem.currentState==='object'?mem.currentState:null;
     d.dayIndex=Number.isInteger(mem.dayIndex)&&mem.dayIndex>=1?mem.dayIndex:1;
     d.absoluteDate=typeof mem.absoluteDate==='string'?mem.absoluteDate:null;
     d.pinnedText=typeof mem.pinnedText==='string'?mem.pinnedText:'';
@@ -559,6 +561,36 @@
     return 0;
   }
   function normalizeImportance(v){return ['critical','high','normal','low'].includes(v)?v:'normal';}
+  function normalizedInfo(v,n=700){const text=ensureShort(v,n);return /^(?:null|undefined|none|unknown|n\/a|정보\s*없음)$/i.test(text)?'':text;}
+  function conversationPosition(id){
+    const row=msgMap.get(activeRoom+'|'+id)||findSource(id);
+    if(!row)return Number.MAX_SAFE_INTEGER;
+    const t=Date.parse(row.time);
+    return Number.isFinite(t)?t:Number.MAX_SAFE_INTEGER;
+  }
+  function sourceIndexMap(){
+    const index=new Map();
+    orderedMessages().forEach((m,i)=>index.set(m.id,i));
+    return index;
+  }
+  function eventPosition(item,index){
+    const positions=safeArray(item.sourceIds).map(id=>index.get(id)).filter(Number.isFinite);
+    return positions.length?Math.min(...positions):Number.MAX_SAFE_INTEGER;
+  }
+  function orderedTimeline(){
+    const entries=safeArray(roomData?.memory?.timeline);
+    const index=sourceIndexMap();
+    return entries.map((item,i)=>({item,i,pos:eventPosition(item,index)})).sort((a,b)=>{
+      // The narrative order for a known absolute-date flashback is its explicit story date.
+      // Relative and unknown dates retain the evidence order; never use chat timestamps as story dates.
+      const da=/^\d{4}-\d{2}-\d{2}$/.test(a.item.storyDate||'')?a.item.storyDate:null;
+      const db=/^\d{4}-\d{2}-\d{2}$/.test(b.item.storyDate||'')?b.item.storyDate:null;
+      if(da&&db&&da!==db)return da.localeCompare(db);
+      if(Number.isInteger(a.item.dayIndex)&&Number.isInteger(b.item.dayIndex)&&a.item.dayIndex!==b.item.dayIndex&&!da&&!db)
+        return a.item.dayIndex-b.item.dayIndex;
+      return a.pos-b.pos||(Number(a.item.orderInSource)||0)-(Number(b.item.orderInSource)||0)||a.i-b.i;
+    }).map(x=>x.item);
+  }
   function quotesVerified(text,source){
     const quotes=[...String(text).matchAll(/[“"]([^“"”]{2,})[”"]/g)];
     return quotes.every(m=>String(source).includes(m[1]));
@@ -595,9 +627,15 @@
     const mem=roomData.memory,allowed=chunkRows.map(x=>x.id),idMap=new Map(chunkRows.map(x=>[x.id,x]));
     let changed=0;
     const timeCueConsumed=new Set();
-    for(const ev of safeArray(delta.events).slice(0,100)){
+    const indexMap=new Map(chunkRows.map((r,i)=>[r.id,i]));
+    const events=safeArray(delta.events).slice(0,160).map((ev,i)=>{
+      const ids=sanitizeSources(ev?.sourceIds,allowed);
+      const anchor=ids.length?Math.min(...ids.map(id=>indexMap.get(id)??Number.MAX_SAFE_INTEGER)):Number.MAX_SAFE_INTEGER;
+      return {ev,i,anchor,sequence:Number.isFinite(Number(ev?.orderInSource))?Number(ev.orderInSource):i};
+    }).sort((a,b)=>a.anchor-b.anchor||a.sequence-b.sequence||a.i-b.i);
+    for(const {ev,sequence} of events){
       const sourceIds=sanitizeSources(ev?.sourceIds,allowed);if(!sourceIds.length)continue;
-      const description=ensureShort(ev.description,800);if(!description)continue;
+      const description=ensureShort(ev.description,2400);if(!description)continue;
       const evidenceText=sourceIds.map(id=>idMap.get(id)?.text||'').join('\n');
       if(!quotesVerified(description,evidenceText))continue;
       if(mem.timeline.some(x=>x.description===description&&x.sourceIds.some(y=>sourceIds.includes(y))))continue;
@@ -608,11 +646,13 @@
       const modelDate=String(ev.absoluteDate||'');
       const date=(modelDate&&modelDate===candidateDate)?modelDate:
         (!modelDate&&candidateDate?candidateDate:null);
+      const historical=ev?.timeType==='past'||ev?.timeType==='recollection';
+      const occurrenceDate=historical?date:null;
       const requested=Math.min(365,Math.max(0,Math.floor(Number(ev.advanceDays)||0)));
       const grounded=explicitDayAdvance(source);
       // A story-date increment must be both requested and explicitly countable in the cited dialogue.
       // If the AI chooses the wrong day count, use the actual text-grounded number instead.
-      let advance=requested>0?grounded:0;
+      let advance=!historical&&requested>0?grounded:0;
       // Several distinct events may cite one message containing one time transition.
       // Advance the story calendar only once for each cited transition message.
       const timeSource=sourceIds.find(id=>explicitDayAdvance(idMap.get(id)?.text||'')>0);
@@ -620,10 +660,13 @@
       if(advance>0&&timeSource)timeCueConsumed.add(timeSource);
       if(!mem.timeline.length)advance=0;
       mem.dayIndex+=advance;
-      if(date)mem.absoluteDate=date;
+      if(date&&!historical)mem.absoluteDate=date;
       else if(advance&&mem.absoluteDate)mem.absoluteDate=daysAfter(mem.absoluteDate,advance);
-      const label=mem.absoluteDate?prettyDate(mem.absoluteDate):`D+${mem.dayIndex}`;
-      mem.timeline.push({id:newId('event'),label,dayIndex:mem.dayIndex,description,
+      const label=occurrenceDate?prettyDate(occurrenceDate):historical?'과거 · 날짜 불명':
+        mem.absoluteDate?prettyDate(mem.absoluteDate):`D+${mem.dayIndex}`;
+      mem.timeline.push({id:newId('event'),label,dayIndex:historical?null:mem.dayIndex,
+        storyDate:occurrenceDate||(!historical?mem.absoluteDate:null),timeType:historical?'past':'present',
+        revealDayIndex:mem.dayIndex,orderInSource:sequence,description,
         sourceIds,importance:normalizeImportance(ev.importance),manual:false});
       changed++;
     }
@@ -634,17 +677,37 @@
       const name=ensureShort(c.name,100),sources=sanitizeSources(c.sourceIds,allowed);if(!name||!sources.length)continue;
       const old=mem.characters.find(x=>x.name===name);
       if(old){
-        if(!old.manual){old.traits=ensureShort(c.traits||old.traits,700);old.secrets=ensureShort(c.secrets||old.secrets,500);old.family=ensureShort(c.family||old.family,500);}
+        if(!old.manual){old.traits=normalizedInfo(c.traits||old.traits,1200);old.secrets=normalizedInfo(c.secrets||old.secrets,900);old.family=normalizedInfo(c.family||old.family,900);}
         old.sourceIds=[...new Set([...old.sourceIds,...sources])].slice(-25);
-      }else{mem.characters.push({id:newId('person'),name,traits:ensureShort(c.traits,700),secrets:ensureShort(c.secrets,500),family:ensureShort(c.family,500),sourceIds:sources,manual:false});changed++;}
+      }else{mem.characters.push({id:newId('person'),name,traits:normalizedInfo(c.traits,1200),secrets:normalizedInfo(c.secrets,900),family:normalizedInfo(c.family,900),sourceIds:sources,manual:false});changed++;}
     }
     for(const r of safeArray(delta.relations).slice(0,40)){
       const a=ensureShort(r.a,90),b=ensureShort(r.b,90),sources=sanitizeSources(r.sourceIds,allowed);
       if(!a||!b||!sources.length||a===b)continue;
       let existing=mem.relations.find(x=>(x.a===a&&x.b===b)||(x.a===b&&x.b===a));
-      const status=ensureShort(r.status,320);
+      const status=normalizedInfo(r.status,1400);
       if(existing){if(!existing.manual&&status)existing.status=status;existing.history.push({status,sourceIds:sources});existing.history=existing.history.slice(-30);existing.sourceIds=[...new Set([...existing.sourceIds,...sources])].slice(-25);}
       else{existing={id:newId('relation'),a,b,status,history:[{status,sourceIds:sources}],sourceIds:sources,manual:false};mem.relations.push(existing);changed++;}
+    }
+    for(const raw of safeArray(delta.emotions).slice(0,70)){
+      const person=normalizedInfo(raw?.person,100),target=normalizedInfo(raw?.target,100);
+      const sources=sanitizeSources(raw?.sourceIds,allowed);
+      const feeling=normalizedInfo(raw?.feeling,350),reason=normalizedInfo(raw?.reason,900),behavior=normalizedInfo(raw?.behavior,900);
+      if(!person||!target||!feeling||!sources.length)continue;
+      const existing=mem.emotions.find(x=>x.person===person&&x.target===target);
+      if(existing){if(!existing.manual){existing.feeling=feeling;existing.reason=reason;existing.behavior=behavior;existing.certainty=raw.certainty==='inferred'?'inferred':'explicit';}
+        existing.sourceIds=[...new Set([...safeArray(existing.sourceIds),...sources])].slice(-25);}
+      else{mem.emotions.push({id:newId('emotion'),person,target,feeling,reason,behavior,
+        certainty:raw.certainty==='inferred'?'inferred':'explicit',sourceIds:sources,manual:false});changed++;}
+    }
+    if(delta.currentState&&typeof delta.currentState==='object'){
+      const state=delta.currentState,sources=sanitizeSources(state.sourceIds,allowed);
+      const summary=normalizedInfo(state.summary,2400);
+      if(summary&&sources.length&&quotesVerified(summary,sources.map(id=>idMap.get(id)?.text||'').join('\n'))){
+        if(!mem.currentState?.manual){mem.currentState={id:mem.currentState?.id||newId('state'),summary,
+          location:normalizedInfo(state.location,350),people:normalizedInfo(state.people,500),
+          conflict:normalizedInfo(state.conflict,700),sourceIds:sources,manual:false};changed++;}
+      }
     }
     for(const issue of safeArray(delta.issues).slice(0,15)){
       const sourceIds=sanitizeSources(issue?.sourceIds,allowed);if(!sourceIds.length)continue;
