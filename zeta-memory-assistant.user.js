@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         제타 AI 기억력 보조 (서사·모순·상기)
 // @namespace    zeta-memory-assistant
-// @version      0.0.4
+// @version      0.0.5
 // @description  과거 대화 로컬 보관, Gemini 서사 기억, 모순 의심 표시, 정정·상기 복사, 기억 검색
 // @updateURL    https://raw.githubusercontent.com/casualJH/zeta-memory-assistant/main/zeta-memory-assistant.user.js
 // @downloadURL  https://raw.githubusercontent.com/casualJH/zeta-memory-assistant/main/zeta-memory-assistant.user.js
@@ -9,6 +9,7 @@
 // @match        https://zeta-ai.io/*
 // @match        https://*.zeta-ai.io/*
 // @run-at       document-start
+// @sandbox      raw
 // @noframes
 // @grant        GM_getValue
 // @grant        GM_setValue
@@ -29,7 +30,7 @@
   'use strict';
   if (window.__zetaMemoryAssistantV1) return;
   window.__zetaMemoryAssistantV1 = true;
-  const VERSION = '0.0.4';
+  const VERSION = '0.0.5';
   const DB_NAME = 'zeta-memory-assistant-db-v1';
   const UUID = /^[0-9a-f]{8}-(?:[0-9a-f]{4}-){3}[0-9a-f]{12}$/i;
   const CHANNEL = 'zmm-' + Array.from(crypto.getRandomValues(new Uint8Array(12)), n => n.toString(16).padStart(2, '0')).join('');
@@ -52,6 +53,8 @@
   let batchQueue=Promise.resolve();
   let runtimeStatus='대화방을 열어 주세요.';
   let usageCache=null;
+  let directControl=null;
+  let bridgeDiagnostics={mode:'대기',roomSource:'없음',apiSeen:0,authorization:false};
 
   function defaultMemory() {
     return {timeline:[],characters:[],relations:[],clues:[],facts:[],issues:[],knowledge:[],
@@ -182,29 +185,56 @@
   }
 
   // Executed in Zeta's page context. It deliberately does NOT send auth tokens across the bridge.
-  function pageBridge(channel, page) {
+  function pageBridge(channel, page, sink) {
     page=page||window;
     'use strict';
-    if(page.__zmmBridgeV1){page.postMessage({tag:'zmm-page',channel,type:'ready',room:page.__zmmBridgeV1.room||null},'*');return;}
+    if(page.__zmmBridgeV1?.channel===channel){
+      const ready={tag:'zmm-page',channel,type:'ready',room:page.__zmmBridgeV1.room||null,authorized:!!page.__zmmBridgeV1.authorized};
+      if(typeof sink==='function')sink(ready);else page.postMessage(ready,'*');
+      return;
+    }
     const api='https://api.zeta-ai.io',valid=/^[0-9a-f]{8}-(?:[0-9a-f]{4}-){3}[0-9a-f]{12}$/i;
     const headersAllowed=['authorization','x-client-native-version','x-client-type','x-client-version','x-device-type','x-user-language'];
     let headers=null,room=null,aborter=null,running=false,epoch=0,lastPath=page.location.pathname+page.location.search;
     const oldFetch=page.fetch,oldOpen=page.XMLHttpRequest.prototype.open,oldHeader=page.XMLHttpRequest.prototype.setRequestHeader,oldSend=page.XMLHttpRequest.prototype.send;
     const xhrState=new WeakMap();
-    const emit=(type,data={})=>page.postMessage({tag:'zmm-page',channel,type,...data},'*');
+    const emit=(type,data={})=>{
+      const message={tag:'zmm-page',channel,type,...data};
+      if(typeof sink==='function'){try{sink(message);return;}catch(e){}}
+      page.postMessage(message,'*');
+    };
     const entries=h=>{try{if(!h)return[];if(h instanceof page.Headers)return [...h.entries()];if(Array.isArray(h))return h;return Object.entries(h);}catch{return[];}};
     const allowedUrl=u=>{try{return new page.URL(String(u),page.location.href).origin===api;}catch{return false;}};
+    const roomPattern=/\/rooms\/([0-9a-f-]{36})(?:[/?#]|$)/i;
+    const currentPath=()=>page.location.pathname+page.location.search;
+    let roomPath=null;
+    function scanRecentRequests(){
+      // Recover room ID when Safari starts the userscript after the first API request.
+      if(room)return;
+      try{
+        const resources=page.performance?.getEntriesByType('resource')||[];
+        for(let i=resources.length-1;i>=0;i--){
+          const url=String(resources[i]?.name||'');
+          if(allowedUrl(url)&&roomPattern.test(url)){setRoom(url);break;}
+        }
+      }catch(e){}
+    }
     function setRoom(url){
-      const match=/\/rooms\/([0-9a-f-]{36})(?:[/?#]|$)/i.exec(String(url));
-      if(match&&valid.test(match[1])){if(room!==match[1]){room=match[1];emit('room',{room});}return;}
-      const path=/\/rooms\/([0-9a-f-]{36})(?:[/?#]|$)/i.exec(page.location.pathname);
-      if(path&&valid.test(path[1])&&room!==path[1]){room=path[1];emit('room',{room});}
+      const match=roomPattern.exec(String(url));
+      if(match&&valid.test(match[1])){
+        if(room!==match[1]){room=match[1];roomPath=currentPath();emit('room',{room,source:allowedUrl(url)?'api':'url'});}
+        return;
+      }
+      const path=roomPattern.exec(page.location.pathname);
+      if(path&&valid.test(path[1])&&room!==path[1]){
+        room=path[1];roomPath=currentPath();emit('room',{room,source:'path'});
+      }
     }
     function keep(h){
       const collected={};for(const [key,value] of entries(h)){
         const k=String(key).toLowerCase();if(headersAllowed.includes(k)&&value!=null)collected[k]=String(value);
       }
-      if(collected.authorization){headers={...(headers||{}),...collected};emit('auth',{room});}
+      if(collected.authorization){headers={...(headers||{}),...collected};emit('auth',{room,authorized:true});}
     }
     function observe(url,response){
       if(!/\/v1\/rooms\/[\da-f-]{36}\/messages(?:[?#]|$)/i.test(String(url)))return;
@@ -215,7 +245,7 @@
     page.fetch=function(input,init){
       let url='';
       try{url=typeof input==='string'?input:input instanceof page.URL?input.href:input?.url||'';
-        if(allowedUrl(url)){keep(init?.headers||input?.headers);setRoom(url);}
+        if(allowedUrl(url)){setRoom(url);keep(init?.headers||input?.headers);}
       }catch{}
       const result=oldFetch.apply(this,arguments);
       if(allowedUrl(url)&&/\/messages(?:[?#]|$)/i.test(String(url)))
@@ -225,7 +255,7 @@
     page.XMLHttpRequest.prototype.open=function(method,url){xhrState.set(this,{method:String(method),url:String(url),headers:[]});return oldOpen.apply(this,arguments);};
     page.XMLHttpRequest.prototype.setRequestHeader=function(name,value){const s=xhrState.get(this);if(s&&allowedUrl(s.url))s.headers.push([name,value]);return oldHeader.apply(this,arguments);};
     page.XMLHttpRequest.prototype.send=function(){const s=xhrState.get(this);if(s&&allowedUrl(s.url)){
-      keep(s.headers);setRoom(s.url);
+      setRoom(s.url);keep(s.headers);
       if(/\/messages(?:[?#]|$)/i.test(s.url))this.addEventListener('load',()=>{
         try{const data=JSON.parse(this.responseText);if(Array.isArray(data.messages))emit('batch',{room,messages:data.messages,source:'live'});}catch{}
       },{once:true});
@@ -233,9 +263,9 @@
     const wait=ms=>new Promise(r=>setTimeout(r,ms));
     async function synchronize(full){
       if(running)return emit('error',{message:'대화 불러오기가 이미 진행 중입니다.'});
-      setRoom(page.location.href);
-      if(!room)return emit('error',{message:'채팅방 ID를 아직 확인하지 못했습니다.'});
-      if(!headers?.authorization)return emit('error',{message:'제타 인증 정보를 아직 감지하지 못했습니다. 채팅방을 새로고침해 주세요.'});
+      setRoom(page.location.href);scanRecentRequests();
+      if(!room)return emit('error',{message:'채팅방 ID 미확인 · 제타 채팅방 새로고침 후 연결 재확인을 눌러 주세요.'});
+      if(!headers?.authorization)return emit('error',{message:'제타 인증 요청 미감지 · 채팅방 새로고침 후 메시지가 로드되는지 확인해 주세요.'});
       const currentRoom=room,myEpoch=++epoch;running=true;aborter=null;
       let cursor=null,limit=100,pages=0,seen=new Set(),cursors=new Set(),completed=false,tries=0;
       emit('syncStart',{room:currentRoom,full});
@@ -269,23 +299,38 @@
       }catch(e){emit('error',{room:currentRoom,message:String(e.message||e)});}
       finally{running=false;aborter=null;emit('syncDone',{room:currentRoom,full,complete:full&&completed,pages,count:seen.size});}
     }
+    function control(action){
+      if(action==='full')synchronize(true);
+      else if(action==='latest')synchronize(false);
+      else if(action==='stop'){epoch++;aborter?.abort();}
+      else if(action==='identify'){
+        setRoom(page.location.href);scanRecentRequests();
+        emit('state',{room,authorized:!!headers?.authorization,source:roomPath===currentPath()?'api/path':'미확인'});
+      }
+    }
     page.addEventListener('message',e=>{
       if(e.source!==page||e.data?.tag!=='zmm-control'||e.data.channel!==channel)return;
-      if(e.data.action==='full')synchronize(true);
-      else if(e.data.action==='latest')synchronize(false);
-      else if(e.data.action==='stop'){epoch++;aborter?.abort();}
-      else if(e.data.action==='identify'){setRoom(page.location.href);emit('state',{room,authorized:!!headers?.authorization});}
+      control(e.data.action);
     });
     setRoom(page.location.href);
-    page.__zmmBridgeV1={get room(){return room;}};
-    emit('ready',{room,authorized:!!headers?.authorization});
+    scanRecentRequests();
+    page.__zmmBridgeV1={channel,get room(){return room;},get authorized(){return !!headers?.authorization;},control};
+    emit('ready',{room,authorized:!!headers?.authorization,mode:typeof sink==='function'?'direct':'postMessage'});
     setInterval(()=>{
-      const path=page.location.pathname+page.location.search;
-      if(path!==lastPath){lastPath=path;const found=/\/rooms\/([0-9a-f-]{36})(?:[/?#]|$)/i.exec(page.location.pathname);
-        if(found&&valid.test(found[1]))setRoom(page.location.href);else if(room)emit('state',{room,authorized:!!headers?.authorization});}
+      const path=currentPath();
+      if(path!==lastPath){
+        lastPath=path;
+        const found=roomPattern.exec(page.location.pathname);
+        if(found&&valid.test(found[1]))setRoom(page.location.href);
+        else if(roomPath!==path){room=null;roomPath=null;emit('room',{room:null,source:'navigation'});scanRecentRequests();}
+      }
+      if(!room)scanRecentRequests();
     },900);
   }
-  function sendBridge(action){window.postMessage({tag:'zmm-control',channel:CHANNEL,action},'*');}
+  function sendBridge(action){
+    if(directControl){try{directControl(action);return;}catch(e){log('direct control failed',e);directControl=null;}}
+    window.postMessage({tag:'zmm-control',channel:CHANNEL,action},'*');
+  }
   function installBridge(){
     // Safari Tampermonkey can block inline script injection under page CSP.
     // First attach hooks directly to the real page window via unsafeWindow.
@@ -294,7 +339,9 @@
     function attachDirect(){
       try{
         if(typeof unsafeWindow==='undefined'||!unsafeWindow?.fetch||!unsafeWindow?.XMLHttpRequest)return false;
-        pageBridge(CHANNEL,unsafeWindow);
+        pageBridge(CHANNEL,unsafeWindow,receiveBridgeData);
+        directControl=action=>unsafeWindow.__zmmBridgeV1.control(action);
+        bridgeDiagnostics.mode='direct';
         return true;
       }catch(err){log('direct bridge hook failed',err);return false;}
     }
@@ -311,7 +358,7 @@
     }
     const direct=attachDirect();
     if(!direct)tryInline();
-    setTimeout(()=>{if(!bridgeReady){tryInline();setStatus('제타 통신 연결 대기 중 · 채팅방을 새로고침하거나 연결 진단을 눌러 주세요.');}},1800);
+    setTimeout(()=>{if(!bridgeReady){if(!direct)tryInline();setStatus('제타 통신 연결 대기 중 · 채팅방을 새로고침하거나 연결 진단을 눌러 주세요.');}},1800);
     setTimeout(()=>{if(!bridgeReady){attachDirect();sendBridge('identify');}},3600);
   }
   function setStatus(text){runtimeStatus=text;updateStatus();}
@@ -356,9 +403,10 @@
     },ms);
   }
   function scheduleAnalysis(ms=2500){clearTimeout(updateTimer);updateTimer=setTimeout(()=>{if(apiSettings.auto)analyzePending().catch(e=>setStatus('자동 분석 오류: '+String(e.message||e)));},ms);}
-  window.addEventListener('message',async e=>{
-    const d=e.data;
-    if(e.source!==window||!d||d.tag!=='zmm-page'||d.channel!==CHANNEL)return;
+  async function receiveBridgeData(d){
+    if(!d||d.tag!=='zmm-page'||d.channel!==CHANNEL)return;
+    if(d.room)bridgeDiagnostics.roomSource=d.source||'API 요청';
+    if(d.type==='auth'||d.authorized)bridgeDiagnostics.authorization=true;
     if(d.type==='ready'){bridgeReady=true;currentBridgeRoom=d.room||null;if(d.room&&d.room!==activeRoom)await changeRoom(d.room);if(d.authorized&&d.room)setStatus('제타 API 연결됨 · 과거 대화를 불러올 수 있습니다.');else if(!d.room)setStatus('제타 연결됨 · 채팅방 ID 감지 대기 중. 메시지가 보이면 새로고침해 주세요.');}
     else if(d.type==='room'){currentBridgeRoom=d.room||null;if(d.room!==activeRoom)await changeRoom(d.room);}
     else if(d.type==='state'){if(d.room&&d.room!==activeRoom)await changeRoom(d.room);setStatus(d.authorized?'제타 인증 확인됨':'채팅 화면의 메시지가 로딩될 때까지 대기 중');}
@@ -377,6 +425,10 @@
       if(d.full&&d.complete&&apiSettings.auto&&getApiKey())scheduleAnalysis(1500);
       if(!d.full&&roomData.fullyLoaded&&apiSettings.auto&&getApiKey())scheduleAnalysis(1800);
     }
+  }
+  window.addEventListener('message',e=>{
+    if(e.source!==window)return;
+    receiveBridgeData(e.data).catch(err=>setStatus('페이지 연결 오류: '+String(err.message||err)));
   });
 
   function getApiKey(){try{return String(GM_getValue('zmm-api-key','')||'').trim();}catch{return'';}}
@@ -648,7 +700,7 @@
   function safeUiItem(kind,id){return memoryArr(kind)?.find(x=>x.id===id)||null;}
   function cardHeading(title,subtitle=''){return `<h3>${esc(title)}</h3>${subtitle?`<p class="zmm-muted">${esc(subtitle)}</p>`:''}`;}
   function homeMarkup(){
-    if(!roomData)return '<div class="zmm-empty">채팅방 ID를 아직 감지하지 못했습니다. 제타 채팅방에서 새로고침해 주세요.<div class="zmm-row"><button data-act="diagnose">연결 재확인</button></div></div>';
+    if(!roomData)return '<div class="zmm-empty">채팅방 ID를 아직 감지하지 못했습니다. 제타 채팅방에서 새로고침해 주세요.<div class="zmm-row"><button data-act="diagnose">연결 재확인</button></div><small>연결 방식: '+esc(bridgeDiagnostics.mode)+' · 인증 확인: '+(bridgeDiagnostics.authorization?'예':'아니요')+'</small></div>';
     const m=roomData.memory,processed=new Set(m.processedIds);
     const pending=messageGroups().filter(x=>!processed.has(x.id)).length;
     const usage=roomData.usage||{};
@@ -937,7 +989,7 @@
     const act=button.dataset.act,id=button.dataset.id,kind=button.dataset.kind;
     if(act==='tab'){tab=button.dataset.tab;ui.edit=null;ui.previewSource=null;render();return;}
     if(act==='close'){panel.hidden=true;return;}
-    if(act==='diagnose'){sendBridge('identify');setStatus(bridgeReady?'제타 연결 확인 요청됨 · 채팅을 새로고침하면 식별 정보가 갱신됩니다.':'페이지 통신 재시도 중 · 채팅방을 새로고침해 주세요.');return;}
+    if(act==='diagnose'){sendBridge('identify');setStatus(`연결 재확인 · 브리지 ${bridgeReady?'정상':'대기'} · 인증 ${bridgeDiagnostics.authorization?'확인됨':'미확인'}. 채팅방 새로고침 후 다시 시도해 주세요.`);return;}
     if(act==='full'){sendBridge('full');return;}
     if(act==='latest'){sendBridge('latest');return;}
     if(act==='analyze'){analyzePending();return;}
