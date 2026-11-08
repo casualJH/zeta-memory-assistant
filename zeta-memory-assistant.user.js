@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         제타 AI 기억력 보조 (서사·모순·상기)
 // @namespace    zeta-memory-assistant
-// @version      0.0.6
+// @version      0.0.7
 // @description  과거 대화 로컬 보관, Gemini 서사 기억, 모순 의심 표시, 정정·상기 복사, 기억 검색
 // @updateURL    https://raw.githubusercontent.com/casualJH/zeta-memory-assistant/main/zeta-memory-assistant.user.js
 // @downloadURL  https://raw.githubusercontent.com/casualJH/zeta-memory-assistant/main/zeta-memory-assistant.user.js
@@ -30,7 +30,7 @@
   'use strict';
   if (window.__zetaMemoryAssistantV1) return;
   window.__zetaMemoryAssistantV1 = true;
-  const VERSION = '0.0.6';
+  const VERSION = '0.0.7';
   const DB_NAME = 'zeta-memory-assistant-db-v1';
   const UUID = /^[0-9a-f]{8}-(?:[0-9a-f]{4}-){3}[0-9a-f]{12}$/i;
   const CHANNEL = 'zmm-' + Array.from(crypto.getRandomValues(new Uint8Array(12)), n => n.toString(16).padStart(2, '0')).join('');
@@ -50,7 +50,7 @@
   let msgMap=new Map(), analysisBusy=false, analysisStop=false, syncBusy=false, syncEpoch=0;
   let pageButton=null, panel=null, content=null, note=null;
   let tab='home', ui={edit:null,searchResults:[],searchAnswer:'',searchQuestion:'',previewSource:null,summaryLength:'normal',lastOutput:'',buttonPos:null,dragged:false};
-  let apiSettings={auto:true,model:BASE_MODEL,inputRate:0.25,outputRate:1.50};
+  let apiSettings={auto:true,model:BASE_MODEL,billingMode:'free',inputRate:0.25,outputRate:1.50};
   let availableModels=[],modelFetchNote='아래 추천 모델 중 선택하거나 API 키로 모델 목록을 불러오세요.';
   let lastLiveSync=0, latestTimer=0, updateTimer=0, currentBridgeRoom=null;
   let batchQueue=Promise.resolve();
@@ -438,7 +438,7 @@
   function getSettings(){
     try{const v=GM_getValue('zmm-settings',{});return v&&typeof v==='object'?v:{};}catch{return{};}
   }
-  function saveSettings(){GM_setValue('zmm-settings',{auto:apiSettings.auto,model:apiSettings.model,inputRate:apiSettings.inputRate,outputRate:apiSettings.outputRate});}
+  function saveSettings(){GM_setValue('zmm-settings',{auto:apiSettings.auto,model:apiSettings.model,billingMode:apiSettings.billingMode,inputRate:apiSettings.inputRate,outputRate:apiSettings.outputRate});}
   function modelLabel(model){
     const id=String(model.id||'');
     const lite=/flash[- ]?lite/i.test(id+' '+(model.label||''));
@@ -865,7 +865,7 @@
       ${ui.lastOutput?`<div class="zmm-output"><button data-act="copy-output">미리보기 내용 복사</button><pre>${esc(ui.lastOutput)}</pre></div>`:''}`;
   }
   function priceEstimate(){
-    if(!roomData)return 0;
+    if(apiSettings.billingMode!=='paid'||!roomData)return 0;
     const u=roomData.usage;
     const cached=Math.max(0,u.cached||0),uncached=Math.max(0,(u.input||0)-cached);
     const cachedRate=apiSettings.model==='gemini-2.5-flash'?0.03:apiSettings.inputRate;
@@ -892,12 +892,19 @@
       <div><strong>${(u.input||0).toLocaleString()}</strong><span>입력 토큰</span></div>
       <div><strong>${(u.output||0).toLocaleString()}</strong><span>출력 토큰</span></div>
       <div><strong>${(u.thinking||0).toLocaleString()}</strong><span>사고 토큰</span></div></div>
-      <p>예상 유료 API 비용: <strong>$${priceEstimate().toFixed(5)}</strong> (USD)</p>
       <p class="zmm-muted">API 분석을 실행하면 선택된 대화 본문과 필요한 과거 기억이 Google Gemini API로 전송됩니다. 사용 전 데이터 전송에 동의하는 경우에만 API 키를 등록하세요.</p>
-      <p class="zmm-muted">현재 설정 요금: 입력 100만 토큰당 $${apiSettings.inputRate}, 출력·사고 100만 토큰당 $${apiSettings.outputRate}. 무료 등급이나 캐싱 할인, 실제 청구액은 다를 수 있습니다. 다른 모델을 고르면 요금을 직접 수정하세요.</p>
-      <div class="zmm-row"><label>입력 요금(USD/1M)<input id="zmm-in-rate" type="number" min="0" max="999" step="0.01" value="${apiSettings.inputRate}"></label>
-      <label>출력 요금(USD/1M)<input id="zmm-out-rate" type="number" min="0" max="999" step="0.01" value="${apiSettings.outputRate}"></label></div>
-      <div class="zmm-row"><button data-act="save-settings">모델·요금 설정 저장</button></div>
+      <h4>API 이용 등급</h4>
+      <label class="zmm-line">이용 방식 <select id="zmm-billing-mode" data-field="billingMode">
+        <option value="free" ${apiSettings.billingMode!=='paid'?'selected':''}>무료 등급 (기본)</option>
+        <option value="paid" ${apiSettings.billingMode==='paid'?'selected':''}>유료 API</option>
+      </select></label>
+      <p class="zmm-muted">무료 등급에서는 요금을 입력할 필요가 없습니다. 이용 등급은 표시·비용 계산용 설정이며 Google 계정의 실제 결제 상태를 변경하지 않습니다.</p>
+      ${apiSettings.billingMode==='paid'? `<div class="zmm-info">이 스크립트에서 기록한 요청의 예상 유료 비용: <strong>${priceEstimate().toFixed(5)}</strong> (USD)</div>
+      <p class="zmm-muted">실제 모델 요금에 맞춰 입력해 주세요. 캐시·할인·실제 청구액은 다를 수 있습니다.</p>
+      <div class="zmm-row"><label>입력 요금(USD/100만 토큰)<input id="zmm-in-rate" type="number" min="0" max="999" step="0.01" value="${apiSettings.inputRate}"></label>
+      <label>출력 요금(USD/100만 토큰)<input id="zmm-out-rate" type="number" min="0" max="999" step="0.01" value="${apiSettings.outputRate}"></label></div>`:
+      '<p class="zmm-muted">무료 등급 선택됨 · 비용 추정은 표시하지 않습니다. 실제 사용 한도와 청구 여부는 Google AI Studio에서 확인해 주세요.</p>'}
+      <div class="zmm-row"><button data-act="save-settings">설정 저장</button></div>
       <h4>백업 · 복원</h4>
       <div class="zmm-row"><button data-act="backup">이 채팅방 JSON 백업</button><button data-act="import">JSON 복원</button></div>
       <input id="zmm-file" type="file" accept=".json,application/json" hidden>
@@ -1099,10 +1106,15 @@
     if(act==='save-settings'){
       const model=$('#zmm-model')?.value.trim()||BASE_MODEL;
       if(!/^[a-z0-9][a-z0-9._-]{2,70}$/i.test(model))return setStatus('모델 이름 형식이 올바르지 않습니다.');
-      const input=Number($('#zmm-in-rate').value),output=Number($('#zmm-out-rate').value);
-      if(!Number.isFinite(input)||!Number.isFinite(output)||input<0||output<0||input>999||output>999)return setStatus('요금은 0~999 사이의 숫자로 입력해 주세요.');
-      apiSettings.model=model;apiSettings.inputRate=input;apiSettings.outputRate=output;
-      saveSettings();setStatus('모델·예상 요금 저장됨');render();return;
+      if(apiSettings.billingMode==='paid'){
+        const inputField=$('#zmm-in-rate'),outputField=$('#zmm-out-rate');
+        const input=Number(inputField?.value),output=Number(outputField?.value);
+        if(!inputField||!outputField||!Number.isFinite(input)||!Number.isFinite(output)||input<0||output<0||input>999||output>999)
+          return setStatus('유료 API 요금은 0~999 사이의 숫자로 입력해 주세요.');
+        apiSettings.inputRate=input;apiSettings.outputRate=output;
+      }
+      apiSettings.model=model;
+      saveSettings();setStatus(apiSettings.billingMode==='paid'?'모델 및 유료 요금 설정 저장됨':'무료 등급 모델 설정 저장됨');render();return;
     }
     if(act==='backup'){backup();return;}
     if(act==='import'){$('#zmm-file')?.click();return;}
@@ -1268,6 +1280,15 @@
       const target=e.target;
       if(target.dataset.field==='auto'){apiSettings.auto=target.checked;saveSettings();setStatus(apiSettings.auto?'자동 분석 켬':'자동 분석 끔 · 로컬 수집은 유지');if(apiSettings.auto&&roomData?.fullyLoaded&&getApiKey())scheduleAnalysis(900);}
       if(target.dataset.field==='summaryLength'){ui.summaryLength=target.value;ui.lastOutput='';}
+      if(target.dataset.field==='billingMode'){
+        const modelInput=panel.querySelector('#zmm-model');
+        ui.pendingModel=modelInput?.value||apiSettings.model;
+        apiSettings.billingMode=target.value==='paid'?'paid':'free';
+        saveSettings();render();
+        const restored=panel.querySelector('#zmm-model');
+        if(restored&&ui.pendingModel)restored.value=ui.pendingModel;
+        setStatus(apiSettings.billingMode==='paid'?'유료 요금 입력란 표시됨':'무료 등급 선택됨 · 요금 입력 불필요');
+      }
       if(target.dataset.field==='modelSelect'){
         const id=target.value;
         const input=panel.querySelector('#zmm-model');if(input)input.value=id;
@@ -1275,7 +1296,7 @@
         if(rates){const inputRate=panel.querySelector('#zmm-in-rate'),outputRate=panel.querySelector('#zmm-out-rate');
           if(inputRate)inputRate.value=String(rates[0]);
           if(outputRate)outputRate.value=String(rates[1]);}
-        setStatus('선택: '+id+' · 아래 모델·요금 설정 저장을 눌러 적용하세요.');
+        setStatus('선택: '+id+' · 설정 저장을 눌러 적용하세요.');
       }
       if(target.dataset.field==='importance'){
         const x=safeUiItem(target.dataset.kind,target.dataset.id);if(x){x.importance=normalizeImportance(target.value);x.manual=true;await saveRoom();setStatus('기억 우선순위 저장됨');}
@@ -1288,6 +1309,7 @@
     });
     setupDrag(pageButton,pageButton,'button');setupDrag($('.zmm-header',panel),panel,'panel');
     apiSettings={...apiSettings,...getSettings()};
+    apiSettings.billingMode=apiSettings.billingMode==='paid'?'paid':'free';
     apiSettings.model=/^[\w.-]{3,70}$/.test(apiSettings.model)?apiSettings.model:BASE_MODEL;
     render();
   }
