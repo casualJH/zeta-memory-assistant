@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         제타 AI 기억력 보조 (서사·모순·상기)
 // @namespace    zeta-memory-assistant
-// @version      0.1.5
+// @version      0.1.6
 // @description  과거 대화 로컬 보관, Gemini 서사 기억, 모순 의심 표시, 정정·상기 복사, 기억 검색
 // @updateURL    https://raw.githubusercontent.com/casualJH/zeta-memory-assistant/main/zeta-memory-assistant.user.js
 // @downloadURL  https://raw.githubusercontent.com/casualJH/zeta-memory-assistant/main/zeta-memory-assistant.user.js
@@ -30,7 +30,7 @@
   'use strict';
   if (window.__zetaMemoryAssistantV1) return;
   window.__zetaMemoryAssistantV1 = true;
-  const VERSION = '0.1.5';
+  const VERSION = '0.1.6';
   const DB_NAME = 'zeta-memory-assistant-db-v1';
   const UUID = /^[0-9a-f]{8}-(?:[0-9a-f]{4}-){3}[0-9a-f]{12}$/i;
   const CHANNEL = 'zmm-' + Array.from(crypto.getRandomValues(new Uint8Array(12)), n => n.toString(16).padStart(2, '0')).join('');
@@ -1107,14 +1107,13 @@
       <label>모델 ID 직접 입력 (선택 사항) <input id="zmm-model" value="${esc(apiSettings.model)}" placeholder="${BASE_MODEL}" autocomplete="off"></label>
       <p class="zmm-muted">목록에서 모델을 고르면 위 입력칸이 바뀝니다. 원하는 모델 ID를 직접 입력해 저장할 수도 있습니다. 모델이 목록에 있어도 무료 등급에서 호출 가능한지는 계정에 따라 달라집니다.</p>
       <label class="zmm-line">새 대화 자동 분석 <input type="checkbox" data-field="auto" ${apiSettings.auto?'checked':''}></label>
-      <div class="zmm-info">검열 느슨: <strong>항상 켬</strong> · 지원되는 안전 카테고리의 API 차단 임곗값을 BLOCK_NONE으로 고정합니다. Google의 기타 정책 제한은 유지됩니다.</div>
       <h4>API 사용량 (이 스크립트에서 기록된 호출)</h4>
       <div class="zmm-metrics"><div><strong>${u.calls||0}</strong><span>호출</span></div>
       <div><strong>${(u.input||0).toLocaleString()}</strong><span>입력 토큰</span></div>
       <div><strong>${(u.output||0).toLocaleString()}</strong><span>출력 토큰</span></div>
       <div><strong>${(u.thinking||0).toLocaleString()}</strong><span>사고 토큰</span></div></div>
       <p class="zmm-muted">API 분석을 실행하면 선택된 대화 본문과 필요한 과거 기억이 Google Gemini API로 전송됩니다. 사용 전 데이터 전송에 동의하는 경우에만 API 키를 등록하세요.</p>
-      <p><a href="https://aistudio.google.com/rate-limit" target="_blank" rel="noopener noreferrer">API 사용량 및 제한 확인</a></p>
+      <div class="zmm-row"><button type="button" class="zmm-main" data-act="api-rate-limit">API 사용량 및 제한 확인 ↗</button></div>
       <h4>API 이용 등급</h4>
       <label class="zmm-line">이용 방식 <select id="zmm-billing-mode" data-field="billingMode">
         <option value="free" ${apiSettings.billingMode!=='paid'?'selected':''}>무료 등급 (기본)</option>
@@ -1310,6 +1309,7 @@
     const act=button.dataset.act,id=button.dataset.id,kind=button.dataset.kind;
     if(act==='tab'||act==='open-settings'){tab=act==='open-settings'?'settings':button.dataset.tab;ui.edit=null;ui.previewSource=null;render();content.scrollTop=0;return;}
     if(act==='close'){panel.hidden=true;return;}
+    if(act==='api-rate-limit'){window.open('https://aistudio.google.com/rate-limit','_blank','noopener,noreferrer');return;}
     if(act==='diagnose'){sendBridge('identify');setStatus(`연결 재확인 · 브리지 ${bridgeReady?'정상':'대기'} · 인증 ${bridgeDiagnostics.authorization?'확인됨':'미확인'}. 채팅방 새로고침 후 다시 시도해 주세요.`);return;}
     if(act==='full'){sendBridge('full');return;}
     if(act==='latest'){sendBridge('latest');return;}
