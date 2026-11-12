@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         제타 기억력 보조
 // @namespace    zeta-memory-assistant
-// @version      0.2.5
+// @version      0.2.6
 // @description  과거 대화 로컬 보관, Gemini 서사 기억, 모순 의심 표시, 정정·상기 복사, 기억 검색
 // @updateURL    https://raw.githubusercontent.com/casualJH/zeta-memory-assistant/main/zeta-memory-assistant.user.js
 // @downloadURL  https://raw.githubusercontent.com/casualJH/zeta-memory-assistant/main/zeta-memory-assistant.user.js
@@ -30,7 +30,7 @@
   'use strict';
   if (window.__zetaMemoryAssistantV1) return;
   window.__zetaMemoryAssistantV1 = true;
-  const VERSION = '0.2.5';
+  const VERSION = '0.2.6';
   const DB_NAME = 'zeta-memory-assistant-db-v1';
   const UUID = /^[0-9a-f]{8}-(?:[0-9a-f]{4}-){3}[0-9a-f]{12}$/i;
   const CHANNEL = 'zmm-' + Array.from(crypto.getRandomValues(new Uint8Array(12)), n => n.toString(16).padStart(2, '0')).join('');
@@ -1628,11 +1628,21 @@
         display:flex;flex-direction:column;background:#1d1d25;color:#f4f3f8;border:1px solid #676277;border-radius:15px;
         font:13px/1.5 system-ui;box-sizing:border-box;box-shadow:0 9px 34px #0009;color-scheme:dark}
       #zmm-panel[hidden]{display:none!important}#zmm-panel *{box-sizing:border-box}
+      #zmm-panel .zmm-resize-handle{position:absolute;width:26px;height:26px;z-index:10;touch-action:none;user-select:none;-webkit-user-select:none}
+      #zmm-panel .zmm-resize-handle[data-corner="tl"]{left:0;top:0;cursor:nwse-resize}
+      #zmm-panel .zmm-resize-handle[data-corner="tr"]{right:0;top:0;cursor:nesw-resize}
+      #zmm-panel .zmm-resize-handle[data-corner="bl"]{left:0;bottom:0;cursor:nesw-resize}
+      #zmm-panel .zmm-resize-handle[data-corner="br"]{right:0;bottom:0;cursor:nwse-resize}
+      #zmm-panel .zmm-resize-handle::after{content:'';position:absolute;width:9px;height:9px;border:2px solid #aaa5b8;opacity:.85}
+      #zmm-panel .zmm-resize-handle[data-corner="tl"]::after{left:4px;top:4px;border-right:0;border-bottom:0}
+      #zmm-panel .zmm-resize-handle[data-corner="tr"]::after{right:4px;top:4px;border-left:0;border-bottom:0}
+      #zmm-panel .zmm-resize-handle[data-corner="bl"]::after{left:4px;bottom:4px;border-right:0;border-top:0}
+      #zmm-panel .zmm-resize-handle[data-corner="br"]::after{right:4px;bottom:4px;border-left:0;border-top:0}
       #zmm-panel button{font:600 12px/1.3 system-ui;color:#f8f8fa;background:#34343e;border:1px solid #656473;border-radius:7px;
         padding:8px 9px;cursor:pointer;min-height:32px}
       #zmm-panel button:disabled{opacity:.55;cursor:default}
       #zmm-panel button.zmm-main{background:#3b5146;border-color:#77a88d}
-      #zmm-panel .zmm-header{padding:10px 11px 6px;display:flex;align-items:center;gap:8px;cursor:grab;user-select:none}
+      #zmm-panel .zmm-header{padding:10px 11px 6px;display:flex;align-items:center;gap:8px;cursor:grab;touch-action:none;user-select:none}
       #zmm-panel .zmm-header button{flex:none;padding:5px 8px;min-height:27px}
       #zmm-panel .zmm-header strong{font-size:14px;flex:1}
       #zmm-panel .zmm-header #zmm-settings-button{font-size:12px;padding:5px 8px}
@@ -1687,7 +1697,11 @@
     pageButton=document.createElement('button');pageButton.id='zmm-launch';pageButton.type='button';pageButton.textContent='기억 보조';
     panel=document.createElement('section');panel.id='zmm-panel';panel.hidden=true;
     panel.innerHTML=`<div class="zmm-header"><strong>제타 AI 기억력 보조</strong><button type="button" id="zmm-settings-button" data-act="open-settings">설정</button><span class="zmm-muted" title="드래그하여 이동">↕</span><button data-act="close">닫기</button></div>
-      <div id="zmm-count"></div><nav id="zmm-tabs"></nav><main id="zmm-content"></main><div id="zmm-status" role="status"></div>`;
+      <div id="zmm-count"></div><nav id="zmm-tabs"></nav><main id="zmm-content"></main><div id="zmm-status" role="status"></div>
+      <div class="zmm-resize-handle" data-corner="tl" title="창 크기 조절" aria-label="왼쪽 위 모서리 크기 조절"></div>
+      <div class="zmm-resize-handle" data-corner="tr" title="창 크기 조절" aria-label="오른쪽 위 모서리 크기 조절"></div>
+      <div class="zmm-resize-handle" data-corner="bl" title="창 크기 조절" aria-label="왼쪽 아래 모서리 크기 조절"></div>
+      <div class="zmm-resize-handle" data-corner="br" title="창 크기 조절" aria-label="오른쪽 아래 모서리 크기 조절"></div>`;
     document.body.append(pageButton,panel);content=$('#zmm-content');note=$('#zmm-status');
     pageButton.addEventListener('click',e=>{
       if(ui.dragged){e.preventDefault();ui.dragged=false;return;}
@@ -1742,6 +1756,7 @@
       if(e.target.id==='zmm-query'&&e.key==='Enter'&&!e.shiftKey){e.preventDefault();searchQuestion(false);}
     });
     setupDrag(pageButton,pageButton,'button');setupDrag($('.zmm-header',panel),panel,'panel');
+    setupPanelResize(panel);
     apiSettings={...apiSettings,...getSettings()};
     apiSettings.billingMode=apiSettings.billingMode==='paid'?'paid':'free';
     apiSettings.model=/^[\w.-]{3,70}$/.test(apiSettings.model)?apiSettings.model:BASE_MODEL;
@@ -1778,6 +1793,81 @@
         target.style.top=Math.max(3,Math.min(innerHeight-45,p.top))+'px';target.style.right='auto';target.style.bottom='auto';
       }
     }catch{}
+  }
+  function setupPanelResize(target){
+    // Custom corner handles work with touch and mouse, unlike CSS resize on iOS Safari.
+    const gap=3,minWidth=220,minHeight=180;
+    const limit=(v,min,max)=>Math.max(min,Math.min(max,v));
+    const viewport=()=>({w:Math.max(1,window.innerWidth),h:Math.max(1,window.innerHeight)});
+    const clampGeometry=(w,h,l,t)=>{
+      const view=viewport(),width=limit(w,Math.min(minWidth,view.w-2*gap),view.w-2*gap),
+        height=limit(h,Math.min(minHeight,view.h-2*gap),view.h-2*gap);
+      return {width,height,left:limit(l,gap,Math.max(gap,view.w-width-gap)),
+        top:limit(t,gap,Math.max(gap,view.h-height-gap))};
+    };
+    function applyGeometry(g){
+      target.style.width=g.width+'px';target.style.height=g.height+'px';
+      target.style.maxHeight='none';target.style.maxWidth='none';
+      target.style.left=g.left+'px';target.style.top=g.top+'px';
+      target.style.right='auto';target.style.bottom='auto';
+    }
+    function saveGeometry(){
+      const r=target.getBoundingClientRect();
+      try{
+        localStorage.setItem('zmm-size-panel',JSON.stringify({width:r.width,height:r.height}));
+        localStorage.setItem('zmm-position-panel',JSON.stringify({left:r.left,top:r.top}));
+      }catch{}
+    }
+    for(const handle of target.querySelectorAll('.zmm-resize-handle')){
+      const corner=handle.dataset.corner;
+      handle.addEventListener('pointerdown',e=>{
+        if(e.button!==undefined&&e.button!==0)return;
+        e.preventDefault();e.stopPropagation();
+        const rect=target.getBoundingClientRect(),startX=e.clientX,startY=e.clientY,id=e.pointerId;
+        const leftSide=corner.includes('l'),topSide=corner.includes('t');
+        // Anchor opposite sides so dragging any corner feels natural.
+        applyGeometry(clampGeometry(rect.width,rect.height,rect.left,rect.top));
+        const base=target.getBoundingClientRect();
+        let dragging=true;
+        const move=ev=>{
+          if(!dragging||ev.pointerId!==id)return;
+          ev.preventDefault();
+          const dx=ev.clientX-startX,dy=ev.clientY-startY,view=viewport();
+          const right=base.right,bottom=base.bottom;
+          const minW=Math.min(minWidth,view.w-2*gap),minH=Math.min(minHeight,view.h-2*gap);
+          const width=leftSide?limit(base.width-dx,minW,right-gap):
+            limit(base.width+dx,minW,view.w-base.left-gap);
+          const height=topSide?limit(base.height-dy,minH,bottom-gap):
+            limit(base.height+dy,minH,view.h-base.top-gap);
+          applyGeometry({width,height,left:leftSide?right-width:base.left,
+            top:topSide?bottom-height:base.top});
+        };
+        const end=ev=>{
+          if(ev.pointerId!==id)return;
+          dragging=false;
+          window.removeEventListener('pointermove',move);
+          window.removeEventListener('pointerup',end);
+          window.removeEventListener('pointercancel',end);
+          saveGeometry();
+        };
+        window.addEventListener('pointermove',move,{passive:false});
+        window.addEventListener('pointerup',end);
+        window.addEventListener('pointercancel',end);
+      },{passive:false});
+    }
+    try{
+      const saved=JSON.parse(localStorage.getItem('zmm-size-panel')||'null');
+      if(saved&&Number.isFinite(saved.width)&&Number.isFinite(saved.height)){
+        const r=target.getBoundingClientRect();
+        applyGeometry(clampGeometry(saved.width,saved.height,r.left,r.top));
+      }
+    }catch{}
+    window.addEventListener('resize',()=>{
+      if(!target.style.height)return;
+      const r=target.getBoundingClientRect();
+      applyGeometry(clampGeometry(r.width,r.height,r.left,r.top));
+      saveGeometry();
+    });
   }
   window.addEventListener('resize',()=>{
     for(const target of [pageButton,panel])if(target&&target.style.left){
