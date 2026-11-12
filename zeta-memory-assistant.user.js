@@ -56,6 +56,7 @@
   let lastLiveSync=0, latestTimer=0, updateTimer=0, currentBridgeRoom=null;
   let batchQueue=Promise.resolve();
   let runtimeStatus='대화방을 열어 주세요.';
+  let liveProfileSnapshot=null,profileLoadRequestedRoom=null;
   let usageCache=null;
   let directControl=null;
   let bridgeDiagnostics={mode:'대기',roomSource:'없음',apiSeen:0,authorization:false};
@@ -488,7 +489,7 @@
   async function changeRoom(room){
     ++syncEpoch;analysisStop=true;analysisBusy=false;syncBusy=false;
     clearTimeout(latestTimer);clearTimeout(updateTimer);
-    activeRoom=room;msgMap=new Map();roomData=null;ui.previewSource=null;ui.peopleSubtab='memory';
+    activeRoom=room;msgMap=new Map();roomData=null;ui.previewSource=null;ui.peopleSubtab='memory';liveProfileSnapshot=null;profileLoadRequestedRoom=null;
     if(!room){setStatus('제타 채팅방을 열어 주세요.');render();return;}
     try{
       const loaded=await Promise.all([dbGet('rooms',room),dbRoomMessages(room)]);
@@ -543,6 +544,21 @@
     else if(d.type==='room'){currentBridgeRoom=d.room||null;if(d.room!==activeRoom)await changeRoom(d.room);}
     else if(d.type==='state'){if(d.room&&d.room!==activeRoom)await changeRoom(d.room);setStatus(d.authorized?'제타 인증 확인됨':'채팅 화면의 메시지가 로딩될 때까지 대기 중');}
     else if(d.type==='auth'){if(d.room&&d.room===activeRoom){if(!roomData?.fullyLoaded)setStatus('제타 인증 확인됨 · 전체 대화 불러오기를 누르세요.');}}
+    else if(d.type==='profile'){
+      if(d.room!==activeRoom)return;
+      liveProfileSnapshot=d.profile||null;
+      if(profileLoadRequestedRoom===activeRoom){
+        // A room-details response can arrive before its plot descriptions.
+        // Do not save an empty snapshot; a later response may contain detail.
+        const p=d.profile;
+        if(p?.character||p?.chatProfile||p?.user){
+          profileLoadRequestedRoom=null;
+          await saveDetectedProfiles(p);
+        }
+      }
+    }
+    else if(d.type==='profileNotice'){if(d.room===activeRoom)setStatus(d.message||'프로필 확인 중');}
+    else if(d.type==='profileError'){if(!d.room||d.room===activeRoom){profileLoadRequestedRoom=null;setStatus(d.message||'프로필 불러오기 실패');}}
     else if(d.type==='batch')batchQueue=batchQueue.then(()=>acceptBatch(d)).catch(err=>setStatus('대화 저장 오류: '+String(err.message||err)));
     else if(d.type==='syncStart'){syncBusy=true;setStatus(d.full?'전체 대화를 불러오는 중…':'최근 대화를 확인하는 중…');}
     else if(d.type==='progress'){if(d.room===activeRoom)setStatus(`${d.full?'전체':'최근'} 대화 수집 · ${d.pages}페이지 · 원본 ${d.count}건`);}
@@ -1087,28 +1103,20 @@
       ?`<article class="zmm-item"><h4>${esc(heading)}</h4><strong>${esc(p.name||'이름 미확인')}</strong>
         ${p.description?`<pre class="zmm-profile-description">${esc(p.description)}</pre>`:'<p class="zmm-muted">프로필 설명 없음</p>'}</article>`
       :`<article class="zmm-item"><h4>${esc(heading)}</h4><p class="zmm-muted">이 프로필은 수집되지 않았습니다.</p></article>`).join('');
-    return `${cardHeading('대화 프로필','현재 채팅 프로필 자동 감지 스크립트에서 불러와 이 채팅방에 저장합니다. 저장 후에는 다시 불러오지 않아도 확인할 수 있습니다.')}
+    return `${cardHeading('대화 프로필','내장된 프로필 감지 기능으로 현재 채팅방의 프로필을 불러와 저장합니다. 별도 스크립트는 필요 없습니다.')}
       <div class="zmm-row"><button class="zmm-main" data-act="load-chat-profiles">${snapshot?'대화 프로필 다시 불러오기':'대화 프로필 불러오기'}</button></div>
       ${snapshot?`<p class="zmm-muted">저장됨 · ${esc(new Date(snapshot.savedAt).toLocaleString('ko-KR'))} · 이 채팅방에만 적용</p>`:
-        '<div class="zmm-empty">저장된 대화 프로필이 없습니다. 제타 현재 채팅 프로필 자동 감지 스크립트를 함께 실행한 후 불러오기를 눌러 주세요.</div>'}
+        '<div class="zmm-empty">저장된 대화 프로필이 없습니다. 위 버튼을 눌러 제타의 프로필 정보를 불러와 주세요.</div>'}
       ${profileCards}`;
   }
-  async function loadChatProfiles(){
-    if(!activeRoom||!roomData)return setStatus('채팅방을 먼저 열어 주세요.');
-    const provider=window.zetaCurrentProfiles;
-    if(!provider||typeof provider.get!=='function')
-      return setStatus('제타 현재 채팅 프로필 자동 감지 스크립트가 필요합니다. 실행 여부를 확인해 주세요.');
-    let current;
-    try{current=provider.get();}catch(e){return setStatus('대화 프로필 접근 실패: '+String(e.message||e));}
-    if(!current||current.roomId!==activeRoom)
-      return setStatus('프로필의 채팅방이 현재 채팅방과 다릅니다. 제타 채팅방을 새로고침해 주세요.');
-    const character=safeProfileData(current.character);
-    const chatProfile=safeProfileData(current.chatProfile);
-    const user=safeProfileData(current.user);
+  async function saveDetectedProfiles(current){
+    if(!activeRoom||!roomData)return;
+    const character=safeProfileData(current?.character);
+    const chatProfile=safeProfileData(current?.chatProfile);
+    const user=safeProfileData(current?.user);
     if(!character&&!chatProfile&&!user)
-      return setStatus('아직 프로필이 감지되지 않았습니다. 프로필 화면을 열어 정보를 불러온 뒤 다시 눌러 주세요.');
-    const room=activeRoom;
-    const previous=roomData.profileSnapshot;
+      return setStatus('현재 프로필을 찾지 못했습니다. 제타에서 프로필 상세 화면을 열고 다시 눌러 주세요.');
+    const room=activeRoom,previous=roomData.profileSnapshot;
     roomData.profileSnapshot={character,chatProfile,user,savedAt:Date.now()};
     try{
       await saveRoom();
@@ -1118,6 +1126,12 @@
       if(room===activeRoom)roomData.profileSnapshot=previous;
       setStatus('대화 프로필 저장 실패: '+String(e.message||e));
     }
+  }
+  async function loadChatProfiles(){
+    if(!activeRoom||!roomData)return setStatus('채팅방을 먼저 열어 주세요.');
+    profileLoadRequestedRoom=activeRoom;
+    setStatus('내장 프로필 감지 기능으로 프로필 불러오는 중…');
+    sendBridge('profiles');
   }
   function peoplePageMarkup(){
     return `<div class="zmm-people-subtabs" role="group" aria-label="인물·관계 하위 탭">
