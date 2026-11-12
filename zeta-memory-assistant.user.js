@@ -1881,8 +1881,11 @@
     });
   }
   window.addEventListener('resize',()=>{
-    for(const target of [pageButton,panel])if(target&&target.style.left){
-      const r=target.getBoundingClientRect();target.style.left=Math.max(3,Math.min(innerWidth-r.width-3,r.left))+'px';
+    // Panel geometry is handled by setupPanelResize (including while hidden).
+    const target=pageButton;
+    if(target&&target.style.left){
+      const r=target.getBoundingClientRect();
+      target.style.left=Math.max(3,Math.min(innerWidth-r.width-3,r.left))+'px';
       target.style.top=Math.max(3,Math.min(innerHeight-r.height-3,r.top))+'px';
     }
   });
