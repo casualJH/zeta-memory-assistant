@@ -1813,9 +1813,12 @@
     }
     function saveGeometry(){
       const r=target.getBoundingClientRect();
+      const width=r.width||parseFloat(target.style.width),height=r.height||parseFloat(target.style.height);
+      const left=r.width?r.left:parseFloat(target.style.left),top=r.height?r.top:parseFloat(target.style.top);
+      if(![width,height,left,top].every(Number.isFinite))return;
       try{
-        localStorage.setItem('zmm-size-panel',JSON.stringify({width:r.width,height:r.height}));
-        localStorage.setItem('zmm-position-panel',JSON.stringify({left:r.left,top:r.top}));
+        localStorage.setItem('zmm-size-panel',JSON.stringify({width,height}));
+        localStorage.setItem('zmm-position-panel',JSON.stringify({left,top}));
       }catch{}
     }
     for(const handle of target.querySelectorAll('.zmm-resize-handle')){
@@ -1858,14 +1861,22 @@
     try{
       const saved=JSON.parse(localStorage.getItem('zmm-size-panel')||'null');
       if(saved&&Number.isFinite(saved.width)&&Number.isFinite(saved.height)){
-        const r=target.getBoundingClientRect();
-        applyGeometry(clampGeometry(saved.width,saved.height,r.left,r.top));
+        // The panel is initially hidden; its bounding box is zero until opened.
+        // Restore the previously saved position instead of moving it to (3,3).
+        const position=JSON.parse(localStorage.getItem('zmm-position-panel')||'null');
+        const view=viewport();
+        const left=Number.isFinite(position?.left)?position.left:view.w-saved.width-9;
+        const top=Number.isFinite(position?.top)?position.top:view.h-saved.height-(view.w<=500?150:108);
+        applyGeometry(clampGeometry(saved.width,saved.height,left,top));
       }
     }catch{}
     window.addEventListener('resize',()=>{
       if(!target.style.height)return;
+      // Hidden panels have no bounding box, so use the saved inline geometry.
       const r=target.getBoundingClientRect();
-      applyGeometry(clampGeometry(r.width,r.height,r.left,r.top));
+      const w=r.width||parseFloat(target.style.width),h=r.height||parseFloat(target.style.height);
+      const l=r.width?r.left:parseFloat(target.style.left),t=r.height?r.top:parseFloat(target.style.top);
+      applyGeometry(clampGeometry(w,h,l,t));
       saveGeometry();
     });
   }
