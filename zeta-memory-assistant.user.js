@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         제타 기억력 보조
 // @namespace    zeta-memory-assistant
-// @version      0.2.7
+// @version      0.2.8
 // @description  과거 대화 로컬 보관, Gemini 서사 기억, 모순 의심 표시, 정정·상기 복사, 기억 검색
 // @updateURL    https://raw.githubusercontent.com/casualJH/zeta-memory-assistant/main/zeta-memory-assistant.user.js
 // @downloadURL  https://raw.githubusercontent.com/casualJH/zeta-memory-assistant/main/zeta-memory-assistant.user.js
@@ -30,7 +30,7 @@
   'use strict';
   if (window.__zetaMemoryAssistantV1) return;
   window.__zetaMemoryAssistantV1 = true;
-  const VERSION = '0.2.7';
+  const VERSION = '0.2.8';
   const DB_NAME = 'zeta-memory-assistant-db-v1';
   const UUID = /^[0-9a-f]{8}-(?:[0-9a-f]{4}-){3}[0-9a-f]{12}$/i;
   const CHANNEL = 'zmm-' + Array.from(crypto.getRandomValues(new Uint8Array(12)), n => n.toString(16).padStart(2, '0')).join('');
@@ -208,6 +208,102 @@
     let headers=null,room=null,aborter=null,running=false,epoch=0,lastPath=page.location.pathname+page.location.search;
     const oldFetch=page.fetch,oldOpen=page.XMLHttpRequest.prototype.open,oldHeader=page.XMLHttpRequest.prototype.setRequestHeader,oldSend=page.XMLHttpRequest.prototype.send;
     const xhrState=new WeakMap();
+    // Built-in counterpart of the user's zeta-current-profiles collector.
+    let profilePlot=null,profileCharacter=null,profileChat=null,profileUser=null,profileEpoch=0;
+    const profileDetails=new Map(),plotDescriptions=new Map();
+    function profileOf(raw){
+      if(!raw||typeof raw!=='object')return null;
+      const first=keys=>keys.map(k=>raw[k]).find(v=>typeof v==='string'&&v.trim())||'';
+      const name=first(['name','displayName','display_name','nickname','title']);
+      const description=typeof raw.description==='string'?raw.description:'';
+      const id=['id','uuid','profileId','profile_id','characterId','character_id'].map(k=>raw[k])
+        .find(v=>typeof v==='string'||typeof v==='number');
+      if(!name&&!description)return null;
+      return {name:name.slice(0,160),description:description.slice(0,20000),
+        id:id==null?'':String(id).slice(0,120)};
+    }
+    function sendProfiles(){
+      if(room)emit('profile',{room,profile:{roomId:room,character:profileCharacter,
+        chatProfile:profileChat,user:profileUser}});
+    }
+    function acceptProfiles(url,body){
+      if(!room||!body||typeof body!=='object'||Array.isArray(body))return;
+      let path;try{const u=new page.URL(url,page.location.href);if(u.origin!==api)return;path=u.pathname;}catch{return;}
+      const match=/\/rooms\/([0-9a-f-]{36})(?:\/|$)/i.exec(path);
+      if(match&&match[1]!==room)return;
+      if(path==='/v1/rooms/'+room){
+        const plot=body.plot;if(plot&&typeof plot==='object'){
+          profilePlot=typeof plot.id==='string'?plot.id:null;
+          const characters=Array.isArray(plot.characters)?plot.characters.map(profileOf).filter(Boolean):[];
+          profileCharacter=characters.length===1?characters[0]:null;
+          const chats=Array.isArray(plot.chatProfiles)?plot.chatProfiles.map(profileOf).filter(Boolean):[];
+          profileChat=chats.length===1?chats[0]:null;
+          sendProfiles();
+        }
+      }
+      if(/\/user-personas\/(select|selected)\/?$/i.test(path)){
+        const user=profileOf(body);if(user){profileUser=user;sendProfiles();}
+      }
+      if(profilePlot&&path.replace(/\/$/,'')==='/v1/plots/'+profilePlot){
+        for(const entry of Array.isArray(body.about?.characters)?body.about.characters:[]){
+          if(typeof entry?.characterId==='string'&&typeof entry?.description==='string')
+            plotDescriptions.set(entry.characterId,entry.description.slice(0,20000));
+        }
+        if(profileCharacter?.id&&plotDescriptions.has(profileCharacter.id)){
+          profileCharacter={...profileCharacter,description:plotDescriptions.get(profileCharacter.id)};
+          sendProfiles();
+        }
+      }
+      // Match only actual IDs in observed API responses, without guessing fields.
+      if(profileCharacter?.id&&!/\/messages(?:\/|$)/i.test(path)){
+        const stack=[body];let n=0;
+        while(stack.length&&n++<1500){
+          const value=stack.pop();if(!value||typeof value!=='object')continue;
+          if(!Array.isArray(value)&&String(value.id||'')===profileCharacter.id&&
+             typeof value.description==='string'&&value.description.trim())
+            profileDetails.set(profileCharacter.id,value.description.slice(0,20000));
+          for(const key of Object.keys(value).slice(0,100)){
+            if(/auth|token|cookie|password|secret|email|phone/i.test(key))continue;
+            if(value[key]&&typeof value[key]==='object')stack.push(value[key]);
+          }
+        }
+        if(profileDetails.has(profileCharacter.id)){
+          profileCharacter={...profileCharacter,description:profileDetails.get(profileCharacter.id)};
+          sendProfiles();
+        }
+      }
+    }
+    function captureProfileResponse(url,response){
+      if(!response?.ok||!/\/rooms\/|\/plots\/|profile|persona|character/i.test(url)||
+        /\/messages(?:\?|$)/i.test(url))return;
+      if(Number(response.headers?.get('content-length')||0)>900000)return;
+      response.clone().text().then(t=>{
+        if(t.length<=900000)try{acceptProfiles(url,JSON.parse(t));}catch{}
+      }).catch(()=>{});
+    }
+    async function refreshProfiles(){
+      setRoom(page.location.href);scanRecentRequests();
+      if(!room)return emit('profileError',{message:'채팅방 ID 미확인'});
+      const forRoom=room,request=++profileEpoch;
+      if(!headers?.authorization){
+        sendProfiles();return emit('profileNotice',{room,message:'제타 인증 정보 감지 전입니다. 채팅방을 새로고침해 주세요.'});
+      }
+      try{
+        const url=api+'/v1/rooms/'+forRoom;
+        const res=await oldFetch.call(page,url,{headers:{...headers},credentials:'include',cache:'no-store'});
+        if(request!==profileEpoch||forRoom!==room)return;
+        if(res.ok)acceptProfiles(url,await res.json());
+        if(profilePlot){
+          const plotUrl=api+'/v1/plots/'+profilePlot;
+          const pr=await oldFetch.call(page,plotUrl,{headers:{...headers},credentials:'include',cache:'no-store'});
+          if(request!==profileEpoch||forRoom!==room)return;
+          if(pr.ok)acceptProfiles(plotUrl,await pr.json());
+        }
+        sendProfiles();
+      }catch(e){if(request===profileEpoch&&forRoom===room){
+        sendProfiles();emit('profileNotice',{room,message:'프로필 API 확인 실패: '+String(e.message||e)});
+      }}
+    }
     const emit=(type,data={})=>{
       const message={tag:'zmm-page',channel,type,...data};
       if(typeof sink==='function'){try{sink(message);return;}catch(e){}}
@@ -232,7 +328,7 @@
     function setRoom(url){
       const match=roomPattern.exec(String(url));
       if(match&&valid.test(match[1])){
-        if(room!==match[1]){room=match[1];roomPath=currentPath();emit('room',{room,source:allowedUrl(url)?'api':'url'});}
+        if(room!==match[1]){room=match[1];roomPath=currentPath();profilePlot=null;profileCharacter=null;profileChat=null;profileUser=null;profileEpoch++;profileDetails.clear();plotDescriptions.clear();emit('room',{room,source:allowedUrl(url)?'api':'url'});}
         return;
       }
       const path=roomPattern.exec(page.location.pathname);
@@ -258,8 +354,11 @@
         if(allowedUrl(url)){setRoom(url);keep(init?.headers||input?.headers);}
       }catch{}
       const result=oldFetch.apply(this,arguments);
-      if(allowedUrl(url)&&/\/messages(?:[?#]|$)/i.test(String(url)))
-        Promise.resolve(result).then(response=>observe(url,response)).catch(()=>{});
+      if(allowedUrl(url)){
+        if(/\/messages(?:[?#]|$)/i.test(String(url)))
+          Promise.resolve(result).then(r=>observe(url,r)).catch(()=>{});
+        else Promise.resolve(result).then(r=>captureProfileResponse(url,r)).catch(()=>{});
+      }
       return result;
     };
     page.XMLHttpRequest.prototype.open=function(method,url){xhrState.set(this,{method:String(method),url:String(url),headers:[]});return oldOpen.apply(this,arguments);};
@@ -269,6 +368,15 @@
       if(/\/messages(?:[?#]|$)/i.test(s.url))this.addEventListener('load',()=>{
         try{const data=JSON.parse(this.responseText);if(Array.isArray(data.messages))emit('batch',{room,messages:data.messages,source:'live'});}catch{}
       },{once:true});
+      else if(/\/rooms\/|\/plots\/|profile|persona|character/i.test(s.url))
+        this.addEventListener('load',()=>{
+          try{
+            if(this.status<200||this.status>=300)return;
+            const data=this.responseType==='json'?this.response:
+              (this.responseType===''||this.responseType==='text')?JSON.parse(this.responseText):null;
+            if(data)acceptProfiles(s.url,data);
+          }catch{}
+        },{once:true});
     }return oldSend.apply(this,arguments);};
     const wait=ms=>new Promise(r=>setTimeout(r,ms));
     async function synchronize(full){
@@ -312,6 +420,7 @@
     function control(action){
       if(action==='full')synchronize(true);
       else if(action==='latest')synchronize(false);
+      else if(action==='profiles')refreshProfiles();
       else if(action==='stop'){epoch++;aborter?.abort();}
       else if(action==='identify'){
         setRoom(page.location.href);scanRecentRequests();
@@ -332,7 +441,7 @@
         lastPath=path;
         const found=roomPattern.exec(page.location.pathname);
         if(found&&valid.test(found[1]))setRoom(page.location.href);
-        else if(roomPath!==path){room=null;roomPath=null;emit('room',{room:null,source:'navigation'});scanRecentRequests();}
+        else if(roomPath!==path){room=null;roomPath=null;profilePlot=null;profileCharacter=null;profileChat=null;profileUser=null;profileEpoch++;profileDetails.clear();plotDescriptions.clear();emit('room',{room:null,source:'navigation'});scanRecentRequests();}
       }
       if(!room)scanRecentRequests();
     },900);
