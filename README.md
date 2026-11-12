@@ -1,4 +1,4 @@
-# 제타 AI 기억력 보조
+# 제타 기억력 보조
 
 제타에서 진행한 이야기를 날짜별로 정리하고, 등장인물의 설정과 관계를 기억하며, 과거 서사와 어긋나는 내용을 찾아주는 **기억력 보조 스크립트**입니다.
 
@@ -13,7 +13,9 @@
 3. 제타에서 사용할 채팅방을 열고 새로고침합니다.
 4. 화면 오른쪽의 **「기억 보조」** 버튼을 누릅니다.
 
-**[제타 AI 기억력 보조 설치하기](https://raw.githubusercontent.com/casualJH/zeta-memory-assistant/main/zeta-memory-assistant.user.js)**
+**창 크기 조절:** 기억 보조 패널의 네 모서리 중 하나를 마우스나 손가락으로 끌면 가로·세로 크기를 바꿀 수 있습니다. 상단 제목 표시줄을 끌면 창을 이동합니다. 조절한 크기와 위치는 브라우저에 저장되어 새로고침 후에도 유지되며, 화면 크기가 바뀌면 화면 안으로 맞춰집니다. 모바일 Safari에서도 사용할 수 있도록 별도의 모서리 드래그 영역을 사용합니다.
+
+**[제타 기억력 보조 설치하기](https://raw.githubusercontent.com/casualJH/zeta-memory-assistant/main/zeta-memory-assistant.user.js)**
 
 ## 처음 사용하는 방법
 
