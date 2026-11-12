@@ -287,7 +287,7 @@
       if(!room)return emit('profileError',{message:'채팅방 ID 미확인'});
       const forRoom=room,request=++profileEpoch;
       if(!headers?.authorization){
-        sendProfiles();return emit('profileNotice',{room,message:'제타 인증 정보 감지 전입니다. 채팅방을 새로고침해 주세요.'});
+        sendProfiles();emit('profileComplete',{room,profile:{roomId:room,character:profileCharacter,chatProfile:profileChat,user:profileUser}});return emit('profileNotice',{room,message:'제타 인증 정보 감지 전입니다. 채팅방을 새로고침해 주세요.'});
       }
       try{
         const url=api+'/v1/rooms/'+forRoom;
@@ -300,9 +300,9 @@
           if(request!==profileEpoch||forRoom!==room)return;
           if(pr.ok)acceptProfiles(plotUrl,await pr.json());
         }
-        sendProfiles();
+        sendProfiles();emit('profileComplete',{room,profile:{roomId:room,character:profileCharacter,chatProfile:profileChat,user:profileUser}});
       }catch(e){if(request===profileEpoch&&forRoom===room){
-        sendProfiles();emit('profileNotice',{room,message:'프로필 API 확인 실패: '+String(e.message||e)});
+        sendProfiles();emit('profileComplete',{room,profile:{roomId:room,character:profileCharacter,chatProfile:profileChat,user:profileUser}});emit('profileNotice',{room,message:'프로필 API 확인 실패: '+String(e.message||e)});
       }}
     }
     const emit=(type,data={})=>{
@@ -547,14 +547,13 @@
     else if(d.type==='profile'){
       if(d.room!==activeRoom)return;
       liveProfileSnapshot=d.profile||null;
+    }
+    else if(d.type==='profileComplete'){
+      if(d.room!==activeRoom)return;
+      liveProfileSnapshot=d.profile||null;
       if(profileLoadRequestedRoom===activeRoom){
-        // A room-details response can arrive before its plot descriptions.
-        // Do not save an empty snapshot; a later response may contain detail.
-        const p=d.profile;
-        if(p?.character||p?.chatProfile||p?.user){
-          profileLoadRequestedRoom=null;
-          await saveDetectedProfiles(p);
-        }
+        profileLoadRequestedRoom=null;
+        await saveDetectedProfiles(d.profile);
       }
     }
     else if(d.type==='profileNotice'){if(d.room===activeRoom)setStatus(d.message||'프로필 확인 중');}
