@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         제타 기억력 보조
 // @namespace    zeta-memory-assistant
-// @version      0.2.3
+// @version      0.2.4
 // @description  과거 대화 로컬 보관, Gemini 서사 기억, 모순 의심 표시, 정정·상기 복사, 기억 검색
 // @updateURL    https://raw.githubusercontent.com/casualJH/zeta-memory-assistant/main/zeta-memory-assistant.user.js
 // @downloadURL  https://raw.githubusercontent.com/casualJH/zeta-memory-assistant/main/zeta-memory-assistant.user.js
@@ -30,7 +30,7 @@
   'use strict';
   if (window.__zetaMemoryAssistantV1) return;
   window.__zetaMemoryAssistantV1 = true;
-  const VERSION = '0.2.3';
+  const VERSION = '0.2.4';
   const DB_NAME = 'zeta-memory-assistant-db-v1';
   const UUID = /^[0-9a-f]{8}-(?:[0-9a-f]{4}-){3}[0-9a-f]{12}$/i;
   const CHANNEL = 'zmm-' + Array.from(crypto.getRandomValues(new Uint8Array(12)), n => n.toString(16).padStart(2, '0')).join('');
@@ -696,23 +696,29 @@
       else if(advance&&mem.absoluteDate)mem.absoluteDate=daysAfter(mem.absoluteDate,advance);
       const label=occurrenceDate?prettyDate(occurrenceDate):historical?'과거 · 날짜 불명':
         mem.absoluteDate?prettyDate(mem.absoluteDate):`D+${mem.dayIndex}`;
-      // Titles are descriptive, never sufficient on their own to merge events.
+      // An episode is defined by its central goal/conflict and outcome, NOT by
+      // mere proximity, location or passage of time. The model must positively
+      // identify continuation of the same narrative arc before joining chunks.
       const episodeKey=ensureShort(ev.episodeKey,120);
+      const arcKey=ensureShort(ev.arcKey,120);
       const boundary=String(ev.sceneBoundary||'').trim().toLowerCase();
-      const explicitNewScene=['new','transition','time_jump'].includes(boundary);
+      const shift=String(ev.narrativeShift||'').trim().toLowerCase();
+      const startsNewArc=['new','transition','time_jump','new_arc'].includes(boundary)||
+        ['new_goal','new_conflict','revelation','resolution','consequence','new_arc'].includes(shift);
       const previous=mem.timeline[mem.timeline.length-1];
       const previousSources=safeArray(previous?.sourceIds);
       const previousLast=Math.max(-1,...previousSources.map(id=>allPositions.get(id)??-1));
       const currentFirst=Math.min(Number.MAX_SAFE_INTEGER,...sourceIds.map(id=>allPositions.get(id)??Number.MAX_SAFE_INTEGER));
       const continuous=previousLast>=0&&currentFirst>=previousLast&&currentFirst-previousLast<=20;
-      // An explicitly stated sleep/wake or major time change prevents cross-scene merging.
-      const sceneTransitionInSource=/(?:잠(?:이|에|을|들|들었|들어|깼|깨었|에서\s*깼)|기상|깨어나|일어나자|몇\s*시간\s*(?:뒤|후|지나)|\d+\s*시간\s*(?:뒤|후|지나)|다음\s*날|이튿날|다음\s*아침|그날\s*저녁|저녁\s*시간|환영회가\s*종료|행사가\s*끝나|장소를\s*옮|이동하)/.test(source);
       const sameEpisode=!!episodeKey&&previous?.episodeKey===episodeKey;
+      // Older saved events have no arcKey. Do not merge them blindly on upgrade.
+      const sameArc=!!arcKey&&!!previous?.arcKey&&previous.arcKey===arcKey;
       const explicitContinuation=ev?.continuesPreviousEpisode===true;
       const compatible=previous&&!previous.manual&&previous.label===label&&
         previous.timeType===(historical?'past':'present')&&advance===0;
-      const canJoin=compatible&&continuous&&!explicitNewScene&&!sceneTransitionInSource&&
-        previous.description.length+description.length<9000&&sameEpisode&&explicitContinuation;
+      const canJoin=compatible&&continuous&&!startsNewArc&&
+        previous.description.length+description.length<9000&&sameArc&&sameEpisode&&
+        explicitContinuation&&shift==='same_arc';
       if(canJoin){
         previous.description=joinEpisodeDescriptions([previous.description,description]);
         previous.sourceIds=[...new Set([...previousSources,...sourceIds])];
@@ -723,7 +729,7 @@
       mem.timeline.push({id:newId('event'),title,label,dayIndex:historical?null:mem.dayIndex,
         storyDate:occurrenceDate||(!historical?mem.absoluteDate:null),timeType:historical?'past':'present',
         revealDayIndex:mem.dayIndex,orderInSource:sequence,description,
-        sourceIds,episodeKey,importance:normalizeImportance(ev.importance),manual:false});
+        sourceIds,episodeKey,arcKey,importance:normalizeImportance(ev.importance),manual:false});
       changed++;
     }
     changed+=mergeItems(mem.facts,delta.facts,allowed,'facts');
@@ -811,17 +817,17 @@
     const last=latest[latest.length-1];
     const refs=safeArray(last.sourceIds).slice(-4);
     return JSON.stringify({
-      lastEpisodes:latest.map(e=>({id:e.id,title:e.title||'',episodeKey:e.episodeKey||'',date:e.label,
+      lastEpisodes:latest.map(e=>({id:e.id,title:e.title||'',episodeKey:e.episodeKey||'',arcKey:e.arcKey||'',date:e.label,
         type:e.timeType,description:String(e.description||'').slice(-2600),
         sourceIds:safeArray(e.sourceIds).slice(-12)})),
       lastSourceMessages:refs.map(id=>{const r=findSource(id);return r?{id,speaker:r.speaker,role:r.role,text:String(r.text).slice(-650)}:null;}).filter(Boolean),
-      instruction:'이전 에피소드의 같은 시간·장소·갈등이 입력에서 계속되면 새 사건을 만들지 말고 계속됨으로 표시. 관계나 등장인물이 같다는 이유만으로 독립 사건까지 합치지 말 것.'
+      instruction:'앞 사건의 중심 목표·갈등·결과가 아직 진행 중인 경우에만 같은 episodeKey와 arcKey로 이어라. 의심에서 증거 발견, 은폐 발각에서 새로운 대립, 대립에서 실제 신체적 결과로 사건의 중심이 바뀌면 새 사건이다. 같은 목표의 진료·검사·대기·확진·가족 통보는 시간·방 이동만으로 쪼개지 않는다.'
     });
   }
   function analysisPrompt(rows){
     const payload=rows.map((m,i)=>({id:m.id,order:i,speaker:m.speaker,role:m.role,kind:m.kind,text:m.text.slice(0,18000)}));
-    const guidance="역할: RP 기록 보관자. 다음 대화가 정확히 이어질 수 있도록 원문 기반 서사를 보존한다. 요약 길이를 맞추려 디테일을 삭제하지 말고 원문에 없는 사건·대사·심리를 만들지 않는다.\n\n사건: 타임라인의 한 항목은 한 문장이나 한 동작이 아니라 한 장면의 완결된 사건 흐름(에피소드)이다. 대화 한두 줄, 몸짓, 감정 표현, 인물 등장, 장소 이동을 각각 독립 사건으로 작성하지 마라. 같은 목표·상황·갈등을 중심으로 이어진 행동→상대 반응→추가 행동→결과를 가능한 한 하나의 충분히 상세한 사건 문단으로 묶는다. 같은 장면의 작은 반응은 사건 설명 속에 포함한다. 독립된 새 갈등이 시작되거나 중요한 약속·결정·관계 전환 또는 결과가 확정될 때만 별도 항목으로 나눈다. 사건 하나에는 충분한 원문 근거와 인물별 행동·대사·변화 과정을 여러 문장으로 기록하며, 'A는 도발적이다'와 같은 성격·상태만을 사건으로 만들지 않는다. 동일한 장소·시간·갈등에서 이어지는 행동과 그 직접 결과는 서로 다른 메시지와 API 묶음에 걸쳐도 하나의 에피소드다. events의 episodeKey에는 같은 연속 장면에만 동일한 짧은 장면 식별자(예: 장소-핵심상황)를 넣는다. 새 장소·시점·독립 갈등이면 새 키를 사용한다. 이전 누적 사건의 마지막 장면이 이번 대화에서 그대로 이어졌다면 동일한 episodeKey를 재사용할 수 있다. 처음부터 여러 메시지에 걸친 하나의 장면을 하나의 events 항목으로 작성하라. 경고를 한 사건, 경고에 물러나는 반응을 다른 사건, 옆 인물의 즉각적 반응을 또 다른 사건으로 나누지 않는다. 사건의 시작(목표)→행동→상대 반응→결과를 하나의 상세한 문단에 기록한다. 같은 장소와 시각에 같은 갈등이 진행 중이면 행동의 강도가 올라가거나 인물이 추가로 반응해도 같은 에피소드다. 서로 다른 사건으로 나누는 기준은 새로운 별개 목적이나 갈등, 실제 시간/장소 전환 또는 새로운 독립 사건의 시작이다. 중요한 고백이나 결정이 기존 갈등의 일부라면 그 에피소드 안에 반드시 포함하되 별도 사건으로 중복 작성하지 않는다. 분석 입력이 여기서 끝나도 미완료 장면은 종료된 것으로 단정하지 않고 기존 에피소드의 계속 진행으로 기록한다. 연속 장면에 독립 이벤트를 여러 개 생성하지 말고, 원문에 있는 행동·반응·변화의 세부 내용을 삭제하지 않는다. events의 continuesPreviousEpisode에는 같은 장면이 직전 저장된 사건에서 이어질 때 true를, 독립 사건이면 false를 적는다. episodeKey는 같은 장소와 구체적인 목표·갈등을 표시하는 일관된 식별자로 사용하며, 인물 이름만으로 키를 만들지 말고 이전 사건과 연결되면 정확히 같은 키를 사용한다.  사건 분할 순서: 1) 실제 원문의 장면 경계(수면과 기상, 상당한 시간 경과, 장소·목적·독립 갈등 전환)를 먼저 찾는다. 2) 각 장면에 구체적인 사건명 title을 지정한다. 예: '기숙사 입주와 취침', '기상 후 침대 갈등', '서지훈과 친구 관계 형성', '환영회 종료 후 학식관 이동'. 3) 사건명별로 시작 목적·행동·상대 반응·결과를 상세히 기록한다. 4) 같은 장면의 행동을 두 사건에 중복 기재하지 않는다. 경고와 거절, 꼬리 반응, 친구 수락과 연락처 교환은 독립 사건이 아닌 한 장면의 연속이다. 반면 잠들기 전과 기상 후는 반드시 별개 장면이다. 행사 종료와 장소 이동 후 시작된 활동은 별도 장면으로 구분한다. 전환이 새로 시작되면 sceneBoundary=new, 잠·기상·시간 경과이면 sceneBoundary=time_jump, 앞 사건의 직접적인 연속이면 sceneBoundary=same으로 지정한다. 사건명만 같거나 인물이 같다는 이유로 통합하지 않는다. 제목이 달라도 실질적으로 같은 목표·갈등이 계속되면 하나의 사건명으로 통합한다. 중요한 세부 사항은 생략하지 않는다. 한 장면을 단문 사건 여러 개로 쪼개지 마라. 사건 수를 늘리는 것이 아니라 실제 전개를 누락 없이 보존하는 것이 목표다. 한 날짜에 수십 개의 사소한 항목을 생성하지 말고 의미 있는 에피소드 중심으로 기록한다.\n\n순서: 입력 원문의 order는 채팅 출력 순서이지 세계관 날짜가 아니다. events를 사건 근거의 순서대로 반환하고, 한 원문에 여러 사건이 있으면 orderInSource를 0,1,2...로 표시한다. sourceIds에 해당 사건의 정확한 메시지 ID를 적는다. 나중에 밝혀진 과거 사건은 timeType=past로, 현재 사건은 present로 명시한다. 과거 사실이 지금 공개된 일 자체도 중요하면 현재의 공개 사건을 따로 기록한다.\n\n날짜: 실제 채팅 작성 날짜를 이야기 날짜로 쓰지 않는다. 사건 근거에 연월일이 명시되었을 때만 absoluteDate=YYYY-MM-DD, 아니면 null. 다음 날·사흘 뒤 같은 명백한 시간 경과의 첫 사건에만 advanceDays를 사용한다. 위젯·상태창은 참고하지만 본문과 충돌하면 본문 우선. 일시적 속마음이나 계획을 실행된 일로 기록하지 않는다. 모르면 불명으로 남긴다.\n\n감정: 지속적으로 행동에 영향을 미치는 감정을 emotions에서 인물→대상 방향으로 적고 종류·강도·원인·행동 패턴을 보존한다. 일시적 감정이나 해결된 감정은 현재 감정선에 넣지 않는다. 명시적 감정은 explicit, 반복 행동에 근거한 해석은 inferred, 근거가 불충분하면 기록하지 않는다. 보호심이나 끌림을 사랑으로 확대하지 않는다.\n\n관계: relations의 status는 현재 관계 단계와 애정·신뢰 방식, 갈등 해결 방식, 거리감, 주도권, 상호 인식 차이를 가능한 한 구체적으로 포함한다. 지속 중인 관계와 이미 해소된 과거 상태를 구분하고, 최신 확정 변화만 반영한다.\n\n현재 장면: currentState는 이번 입력의 가장 마지막으로 진행된 실제 장면이다. 장소·등장 인물·진행 중 갈등·마지막 상황을 구체적으로 적는다. 이 묶음의 마지막을 전체 스토리의 마지막이라고 단정하지 않는다.\n\n미해결: clues에 진행 중인 갈등, 미이행 약속·합의·조건·일정·복선의 현재 영향 및 위험을 보존한다. 완료·취소된 약속을 현재 유효한 것으로 기록하지 않는다. knowledge에서 누가 무엇을 알고 모르는지 구분한다. 미확인 내면·미래 사건을 확정하지 않는다.\n\n대사와 근거: 고백·협박·약속·선언·관계가 변한 대사는 실제 원문에 있는 표현만 큰따옴표로 인용한다. 의역은 따옴표 없이 간접 서술한다.  OOC는 작품 사건이 아니다. 모순 issues는 제타 AI의 서사 기억 오류만 감지한다. 과거에 확정된 장소 위치·외모·이력·관계·호칭·기본 말투·과거 사건·지식·세계관 사실을 AI가 이후 객관적 지문에서 다르게 서술한 경우만 보고한다. 캐릭터의 거짓말·변명·주관적인 대사·감정과 행동 불일치·논쟁·질투·독점욕·플러팅·반박·상대의 주장을 부정하는 말은 절대로 모순으로 취급하지 않는다. 최신 내용이 인물의 발언이면 모순 후보에서 제외한다. 확정된 설정이 실제 전개에서 변경되었다면 모순이 아니다. 과거 근거의 정확한 원문 연속 부분 문자열 evidenceQuote와 과거 원문 ID evidenceIds, 충돌하는 최신 AI 객관적 서술의 정확한 연속 부분 문자열 quote와 최신 원문 ID sourceIds를 모두 제공한다. 반드시 statementType=narration, errorType=place/appearance/relationship/history/speech/knowledge/timeline/world 중 하나로 작성하고 명확한 충돌 근거가 없으면 issues=[]로 둔다.\n\n출력: 글자 수·사건 수 할당량이 없다. 누락을 줄이기 위해 모든 원문 메시지를 확인하되 사건을 억지로 늘리지 않는다. 응답은 코드 블록 없이 JSON 객체 하나. 원문이 없는 항목은 빈 배열, 미상 가족·비밀은 빈 문자열. sourceIds는 실제 제공된 row ID만 사용한다.";
-    const format="{\"events\":[{\"description\":\"배경·행동·반응·결과·영향\",\"timeType\":\"present\",\"orderInSource\":0,\"advanceDays\":0,\"absoluteDate\":null,\"sourceIds\":[\"원문 ID\"],\"importance\":\"normal\",\"episodeKey\":\"강당-자리다툼\",\"continuesPreviousEpisode\":false,\"title\":\"기숙사 입주와 취침\",\"sceneBoundary\":\"new\"}],\"currentState\":{\"summary\":\"입력 마지막 실제 장면\",\"location\":\"\",\"people\":\"\",\"conflict\":\"\",\"sourceIds\":[\"원문 ID\"]},\"emotions\":[{\"person\":\"\",\"target\":\"\",\"feeling\":\"\",\"reason\":\"\",\"behavior\":\"\",\"certainty\":\"explicit\",\"sourceIds\":[\"원문 ID\"]}],\"facts\":[{\"text\":\"\",\"tag\":\"설정\",\"sourceIds\":[\"원문 ID\"],\"importance\":\"high\"}],\"characters\":[{\"name\":\"\",\"traits\":\"\",\"family\":\"\",\"secrets\":\"\",\"sourceIds\":[\"원문 ID\"]}],\"relations\":[{\"a\":\"\",\"b\":\"\",\"status\":\"현재 관계 유지 방식\",\"sourceIds\":[\"원문 ID\"]}],\"clues\":[{\"title\":\"\",\"detail\":\"현재 영향·미이행 조건\",\"status\":\"open\",\"sourceIds\":[\"원문 ID\"]}],\"knowledge\":[{\"character\":\"\",\"text\":\"\",\"status\":\"knows\",\"sourceIds\":[\"원문 ID\"]}],\"issues\":[{\"quote\":\"AI 객관적 서술 그대로\",\"reason\":\"과거 확정 사실과 다른 점\",\"correction\":\"기존 설정에 부합하는 정정\",\"statementType\":\"narration\",\"errorType\":\"place\",\"evidenceQuote\":\"이전 원문의 정확한 근거 문구\",\"sourceIds\":[\"최신 원문 ID\"],\"evidenceIds\":[\"과거 원문 ID\"]}]}";
+    const guidance="역할: RP 기록 보관자. 다음 대화가 정확히 이어질 수 있도록 원문 기반 서사를 보존한다. 요약 길이를 맞추려 디테일을 삭제하지 말고 원문에 없는 사건·대사·심리를 만들지 않는다.\n\n사건: 하나의 항목은 중심 목적·갈등·결정적 결과로 정의되는 의미 있는 서사 사건이다. 사건 수를 최소화하려고 서로 다른 중심 사건을 합치지 말고, 작은 동작 수만 늘리려고 같은 사건을 쪼개지도 마라. 먼저 전체 원문을 순서대로 읽고 모든 주요 서사 전환점을 구분한 뒤, 각 사건에 전체 서술을 정확히 대표하는 구체적인 title을 부여하고 시작→행동→상대 반응→새 사실→결과를 충분히 상세하게 적는다. 사건명과 설명 후반부가 다른 주제를 말하기 시작한다면 그곳에 독립 사건 경계가 있을 수 있으므로 다시 검토한다. 새로운 목적·독립 갈등·결정적 증거 확보·숨겨진 사실의 발각으로 갈등의 성격 변화·갈등에서 별개의 행동과 결과로 이행한 순간은 새 사건으로 나눈다. 하지만 동일한 질문에 답하기 위한 일련의 과정, 즉 병원 방문→피검사→대기→진단 확정→즉시 가족에게 통보 같은 절차는 장소가 바뀌거나 한 시간이 지나도 하나의 중심 사건으로 기록할 수 있다. 단순히 수면·기상·시간 경과·장소 이동만 있었다고 기계적으로 나누지 말고 그 전후의 사건 목적 및 전개 단절을 확인한다. 반대로 같은 장소·날짜·등장인물이라도 귀가·치료, 외도 의심, 휴대폰과 호텔 기록에서 거짓말 발각, 러트 은폐 및 억제제 갈등, 페로몬 테스트와 통제력 상실처럼 중심 목적이나 결정적 결과가 새로 등장하면 별도 사건이다. 이 예시를 고정 제목·고정 개수 템플릿으로 복제하지 말고 실제 입력의 전개에 맞게 사건 경계를 판단한다.\n\n세부 사건 작성: 한 사건 안의 경고·반박·설득·꼬리 반응·제안 수락·연락처 교환처럼 하나의 목표에 따른 직접 행동과 반응은 따로 쪼개지 않는다. 하나의 사건 제목이 여러 긴 문단을 덮어 서로 다른 갈등을 숨기지 않게 하라. 사건명(title)은 사건의 중심 목적/결과를 명확히 드러내고, 인물명 또는 장소만으로 제목을 만들지 않는다. 사건명은 저장·표시용이며 제목이 같다는 이유만으로 다른 시점의 사건을 합치지 않는다. 각 항목의 description은 하나의 사건 내용만 담되 핵심 대사·원인·행동·반응·결과는 삭제하지 않는다. 서로 다른 사건에 동일한 행동을 중복해서 기록하지 않는다. 입력이 중간에서 끊기면 임의로 결말을 만들지 말고 그 단계까지의 내용을 보존한다. 중요한 원문 근거를 포함하며 인물의 속마음을 추측해서 확정하지 않는다.\n\n연속 묶음 판정: episodeKey는 '이 사건 자체'의 식별자, arcKey는 동일한 중심 목표·갈등·결정적 결과의 연결 식별자다. 이전 누적 사건이 이번 입력에서 그대로 이어지고 중심 목표가 아직 같을 때에만 이전 episodeKey와 arcKey를 모두 정확히 재사용하고, continuesPreviousEpisode=true, narrativeShift='same_arc', sceneBoundary='same'으로 표시한다. 새로운 중심 사건의 시작이면 새 episodeKey와 arcKey를 생성하고 continuesPreviousEpisode=false, narrativeShift='new_goal'/'new_conflict'/'revelation'/'resolution'/'consequence'/'new_arc' 중 가장 가까운 값을 사용한다. sceneBoundary는 같은 사건의 연속이면 'same', 의미 있는 별도 사건이 시작되면 'new_arc'로 적는다. 장소·시각만 바뀌지만 같은 목적이 계속되면 'same'이다. 동일 장소나 인물이 나온다는 이유, 직전 대화와 가깝다는 이유, 제목이 비슷하다는 이유만으로 'same_arc'라고 판단하지 않는다. 묶음의 첫 사건은 반드시 직전 누적 사건과 실제로 이어지는지 확인하며, 입력 묶음 안의 두 독립 사건을 하나로 합치지 않는다. 사건의 수량 제한은 없고 생성할 사건 수는 원문의 구조로 정한다.\n\n순서: 입력 원문의 order는 채팅 출력 순서이지 세계관 날짜가 아니다. events를 사건 근거의 순서대로 반환하고, 한 원문에 여러 사건이 있으면 orderInSource를 0,1,2...로 표시한다. sourceIds에 해당 사건의 정확한 메시지 ID를 적는다. 나중에 밝혀진 과거 사건은 timeType=past로, 현재 사건은 present로 명시한다. 과거 사실이 지금 공개된 일 자체도 중요하면 현재의 공개 사건을 따로 기록한다.\n\n날짜: 실제 채팅 작성 날짜를 이야기 날짜로 쓰지 않는다. 사건 근거에 연월일이 명시되었을 때만 absoluteDate=YYYY-MM-DD, 아니면 null. 다음 날·사흘 뒤 같은 명백한 시간 경과의 첫 사건에만 advanceDays를 사용한다. 위젯·상태창은 참고하지만 본문과 충돌하면 본문 우선. 일시적 속마음이나 계획을 실행된 일로 기록하지 않는다. 모르면 불명으로 남긴다.\n\n감정: 지속적으로 행동에 영향을 미치는 감정을 emotions에서 인물→대상 방향으로 적고 종류·강도·원인·행동 패턴을 보존한다. 일시적 감정이나 해결된 감정은 현재 감정선에 넣지 않는다. 명시적 감정은 explicit, 반복 행동에 근거한 해석은 inferred, 근거가 불충분하면 기록하지 않는다. 보호심이나 끌림을 사랑으로 확대하지 않는다.\n\n관계: relations의 status는 현재 관계 단계와 애정·신뢰 방식, 갈등 해결 방식, 거리감, 주도권, 상호 인식 차이를 가능한 한 구체적으로 포함한다. 지속 중인 관계와 이미 해소된 과거 상태를 구분하고, 최신 확정 변화만 반영한다.\n\n현재 장면: currentState는 이번 입력의 가장 마지막으로 진행된 실제 장면이다. 장소·등장 인물·진행 중 갈등·마지막 상황을 구체적으로 적는다. 이 묶음의 마지막을 전체 스토리의 마지막이라고 단정하지 않는다.\n\n미해결: clues에 진행 중인 갈등, 미이행 약속·합의·조건·일정·복선의 현재 영향 및 위험을 보존한다. 완료·취소된 약속을 현재 유효한 것으로 기록하지 않는다. knowledge에서 누가 무엇을 알고 모르는지 구분한다. 미확인 내면·미래 사건을 확정하지 않는다.\n\n대사와 근거: 고백·협박·약속·선언·관계가 변한 대사는 실제 원문에 있는 표현만 큰따옴표로 인용한다. 의역은 따옴표 없이 간접 서술한다.  OOC는 작품 사건이 아니다. 모순 issues는 제타 AI의 서사 기억 오류만 감지한다. 과거에 확정된 장소 위치·외모·이력·관계·호칭·기본 말투·과거 사건·지식·세계관 사실을 AI가 이후 객관적 지문에서 다르게 서술한 경우만 보고한다. 캐릭터의 거짓말·변명·주관적인 대사·감정과 행동 불일치·논쟁·질투·독점욕·플러팅·반박·상대의 주장을 부정하는 말은 절대로 모순으로 취급하지 않는다. 최신 내용이 인물의 발언이면 모순 후보에서 제외한다. 확정된 설정이 실제 전개에서 변경되었다면 모순이 아니다. 과거 근거의 정확한 원문 연속 부분 문자열 evidenceQuote와 과거 원문 ID evidenceIds, 충돌하는 최신 AI 객관적 서술의 정확한 연속 부분 문자열 quote와 최신 원문 ID sourceIds를 모두 제공한다. 반드시 statementType=narration, errorType=place/appearance/relationship/history/speech/knowledge/timeline/world 중 하나로 작성하고 명확한 충돌 근거가 없으면 issues=[]로 둔다.\n\n출력: 글자 수·사건 수 할당량이 없다. 누락을 줄이기 위해 모든 원문 메시지를 확인하되 사건을 억지로 늘리지 않는다. 응답은 코드 블록 없이 JSON 객체 하나. 원문이 없는 항목은 빈 배열, 미상 가족·비밀은 빈 문자열. sourceIds는 실제 제공된 row ID만 사용한다.";
+    const format="{\"events\":[{\"description\":\"배경·행동·반응·결과·영향\",\"timeType\":\"present\",\"orderInSource\":0,\"advanceDays\":0,\"absoluteDate\":null,\"sourceIds\":[\"원문 ID\"],\"importance\":\"normal\",\"episodeKey\":\"강당-자리다툼\",\"continuesPreviousEpisode\":false,\"title\":\"기숙사 입주와 취침\",\"sceneBoundary\":\"new_arc\",\"arcKey\":\"강당-자리다툼\",\"narrativeShift\":\"new_arc\"}],\"currentState\":{\"summary\":\"입력 마지막 실제 장면\",\"location\":\"\",\"people\":\"\",\"conflict\":\"\",\"sourceIds\":[\"원문 ID\"]},\"emotions\":[{\"person\":\"\",\"target\":\"\",\"feeling\":\"\",\"reason\":\"\",\"behavior\":\"\",\"certainty\":\"explicit\",\"sourceIds\":[\"원문 ID\"]}],\"facts\":[{\"text\":\"\",\"tag\":\"설정\",\"sourceIds\":[\"원문 ID\"],\"importance\":\"high\"}],\"characters\":[{\"name\":\"\",\"traits\":\"\",\"family\":\"\",\"secrets\":\"\",\"sourceIds\":[\"원문 ID\"]}],\"relations\":[{\"a\":\"\",\"b\":\"\",\"status\":\"현재 관계 유지 방식\",\"sourceIds\":[\"원문 ID\"]}],\"clues\":[{\"title\":\"\",\"detail\":\"현재 영향·미이행 조건\",\"status\":\"open\",\"sourceIds\":[\"원문 ID\"]}],\"knowledge\":[{\"character\":\"\",\"text\":\"\",\"status\":\"knows\",\"sourceIds\":[\"원문 ID\"]}],\"issues\":[{\"quote\":\"AI 객관적 서술 그대로\",\"reason\":\"과거 확정 사실과 다른 점\",\"correction\":\"기존 설정에 부합하는 정정\",\"statementType\":\"narration\",\"errorType\":\"place\",\"evidenceQuote\":\"이전 원문의 정확한 근거 문구\",\"sourceIds\":[\"최신 원문 ID\"],\"evidenceIds\":[\"과거 원문 ID\"]}]}";
     return guidance+'\n\nJSON 예시 형식: '+format+
       '\n\n[직전 진행 중인 에피소드 — 이번 묶음이 계속되는지 최우선 확인]\n'+recentEpisodeContext()+
       '\n\n[기존 누적 기억 — 맥락 참고용, 과거 사건을 중복 생성하지 말 것]\n'+memoryContext()+
