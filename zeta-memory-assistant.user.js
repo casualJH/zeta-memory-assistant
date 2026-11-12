@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         제타 기억력 보조
 // @namespace    zeta-memory-assistant
-// @version      0.2.6
+// @version      0.2.7
 // @description  과거 대화 로컬 보관, Gemini 서사 기억, 모순 의심 표시, 정정·상기 복사, 기억 검색
 // @updateURL    https://raw.githubusercontent.com/casualJH/zeta-memory-assistant/main/zeta-memory-assistant.user.js
 // @downloadURL  https://raw.githubusercontent.com/casualJH/zeta-memory-assistant/main/zeta-memory-assistant.user.js
@@ -30,7 +30,7 @@
   'use strict';
   if (window.__zetaMemoryAssistantV1) return;
   window.__zetaMemoryAssistantV1 = true;
-  const VERSION = '0.2.6';
+  const VERSION = '0.2.7';
   const DB_NAME = 'zeta-memory-assistant-db-v1';
   const UUID = /^[0-9a-f]{8}-(?:[0-9a-f]{4}-){3}[0-9a-f]{12}$/i;
   const CHANNEL = 'zmm-' + Array.from(crypto.getRandomValues(new Uint8Array(12)), n => n.toString(16).padStart(2, '0')).join('');
@@ -50,7 +50,7 @@
   let dbPromise, mounted=false, bridgeReady=false, activeRoom=null, roomData=null;
   let msgMap=new Map(), analysisBusy=false, analysisStop=false, syncBusy=false, syncEpoch=0;
   let pageButton=null, panel=null, content=null, note=null;
-  let tab='home', ui={edit:null,searchResults:[],searchAnswer:'',searchQuestion:'',previewSource:null,summaryLength:'normal',lastOutput:'',reminderCache:null,reminderBusy:false,timelineSelection:[],timelineSelectionMode:false,buttonPos:null,dragged:false};
+  let tab='home', ui={edit:null,searchResults:[],searchAnswer:'',searchQuestion:'',previewSource:null,summaryLength:'normal',lastOutput:'',reminderCache:null,reminderBusy:false,timelineSelection:[],timelineSelectionMode:false,peopleSubtab:'memory',buttonPos:null,dragged:false};
   let apiSettings={auto:true,model:BASE_MODEL,billingMode:'free',inputRate:0.25,outputRate:1.50};
   let availableModels=[],modelFetchNote='아래 추천 모델 중 선택하거나 API 키로 모델 목록을 불러오세요.';
   let lastLiveSync=0, latestTimer=0, updateTimer=0, currentBridgeRoom=null;
@@ -66,7 +66,7 @@
       dayIndex:1,absoluteDate:null,processedIds:[],pinnedText:'',updatedAt:null};
   }
   function defaultRoom(room) {
-    return {room, memory:defaultMemory(), fullyLoaded:false, lastSync:null,
+    return {room, memory:defaultMemory(), profileSnapshot:null, fullyLoaded:false, lastSync:null,
       usage:{calls:0,input:0,output:0,thinking:0,cached:0,errors:0},
       createdAt:Date.now(), updatedAt:Date.now()};
   }
@@ -379,7 +379,7 @@
   async function changeRoom(room){
     ++syncEpoch;analysisStop=true;analysisBusy=false;syncBusy=false;
     clearTimeout(latestTimer);clearTimeout(updateTimer);
-    activeRoom=room;msgMap=new Map();roomData=null;ui.previewSource=null;
+    activeRoom=room;msgMap=new Map();roomData=null;ui.previewSource=null;ui.peopleSubtab='memory';
     if(!room){setStatus('제타 채팅방을 열어 주세요.');render();return;}
     try{
       const loaded=await Promise.all([dbGet('rooms',room),dbRoomMessages(room)]);
@@ -961,6 +961,61 @@
     return cardHeading('서사 타임라인','연속된 장면을 에피소드로 정리합니다. 날짜와 사건 내용은 수동 수정한 기록을 보호합니다.')+
       snapshot+tools+(blocks.join('')||'<div class="zmm-empty">아직 서사 기록이 없습니다.</div>');
   }
+  function safeProfileData(raw){
+    if(!raw||typeof raw!=='object')return null;
+    const pick=(value,max)=>typeof value==='string'?value.slice(0,max):'';
+    return {name:pick(raw.name,160),description:pick(raw.description,20000),
+      image:pick(raw.image,1200),id:raw.id==null?'':String(raw.id).slice(0,120)};
+  }
+  function profileSnapshotMarkup(){
+    const snapshot=roomData?.profileSnapshot;
+    const cards=snapshot?[
+      ['현재 캐릭터',snapshot.character],
+      ['채팅 프로필',snapshot.chatProfile],
+      ['유저 프로필',snapshot.user]
+    ]:[];
+    const profileCards=cards.map(([heading,p])=>p
+      ?`<article class="zmm-item"><h4>${esc(heading)}</h4><strong>${esc(p.name||'이름 미확인')}</strong>
+        ${p.description?`<pre class="zmm-profile-description">${esc(p.description)}</pre>`:'<p class="zmm-muted">프로필 설명 없음</p>'}</article>`
+      :`<article class="zmm-item"><h4>${esc(heading)}</h4><p class="zmm-muted">이 프로필은 수집되지 않았습니다.</p></article>`).join('');
+    return `${cardHeading('대화 프로필','현재 채팅 프로필 자동 감지 스크립트에서 불러와 이 채팅방에 저장합니다. 저장 후에는 다시 불러오지 않아도 확인할 수 있습니다.')}
+      <div class="zmm-row"><button class="zmm-main" data-act="load-chat-profiles">${snapshot?'대화 프로필 다시 불러오기':'대화 프로필 불러오기'}</button></div>
+      ${snapshot?`<p class="zmm-muted">저장됨 · ${esc(new Date(snapshot.savedAt).toLocaleString('ko-KR'))} · 이 채팅방에만 적용</p>`:
+        '<div class="zmm-empty">저장된 대화 프로필이 없습니다. 제타 현재 채팅 프로필 자동 감지 스크립트를 함께 실행한 후 불러오기를 눌러 주세요.</div>'}
+      ${profileCards}`;
+  }
+  async function loadChatProfiles(){
+    if(!activeRoom||!roomData)return setStatus('채팅방을 먼저 열어 주세요.');
+    const provider=window.zetaCurrentProfiles;
+    if(!provider||typeof provider.get!=='function')
+      return setStatus('제타 현재 채팅 프로필 자동 감지 스크립트가 필요합니다. 실행 여부를 확인해 주세요.');
+    let current;
+    try{current=provider.get();}catch(e){return setStatus('대화 프로필 접근 실패: '+String(e.message||e));}
+    if(!current||current.roomId!==activeRoom)
+      return setStatus('프로필의 채팅방이 현재 채팅방과 다릅니다. 제타 채팅방을 새로고침해 주세요.');
+    const character=safeProfileData(current.character);
+    const chatProfile=safeProfileData(current.chatProfile);
+    const user=safeProfileData(current.user);
+    if(!character&&!chatProfile&&!user)
+      return setStatus('아직 프로필이 감지되지 않았습니다. 프로필 화면을 열어 정보를 불러온 뒤 다시 눌러 주세요.');
+    const room=activeRoom;
+    const previous=roomData.profileSnapshot;
+    roomData.profileSnapshot={character,chatProfile,user,savedAt:Date.now()};
+    try{
+      await saveRoom();
+      if(room!==activeRoom)return;
+      render();setStatus('대화 프로필 저장 완료 · 새로고침 후에도 유지됩니다.');
+    }catch(e){
+      if(room===activeRoom)roomData.profileSnapshot=previous;
+      setStatus('대화 프로필 저장 실패: '+String(e.message||e));
+    }
+  }
+  function peoplePageMarkup(){
+    return `<div class="zmm-people-subtabs" role="group" aria-label="인물·관계 하위 탭">
+      <button type="button" data-act="people-subtab" data-subtab="memory" class="${ui.peopleSubtab==='memory'?'active':''}">인물·관계</button>
+      <button type="button" data-act="people-subtab" data-subtab="profiles" class="${ui.peopleSubtab==='profiles'?'active':''}">대화 프로필</button>
+    </div>`+(ui.peopleSubtab==='profiles'?profileSnapshotMarkup():peopleMarkup());
+  }
   function peopleMarkup(){
     const m=roomData?.memory;
     return cardHeading('인물별 기억','지속 감정과 현재 관계를 구분합니다. 수동 편집한 정보는 보호됩니다.')+
@@ -1253,7 +1308,7 @@
     if(tabs)tabs.innerHTML=Object.entries(titles).map(([id,title])=>`<button type="button" data-act="tab" data-tab="${id}" class="${tab===id?'active':''}">${title}</button>`).join('');
     const settingsButton=$('#zmm-settings-button',panel);
     if(settingsButton)settingsButton.classList.toggle('active',tab==='settings');
-    const html=({home:homeMarkup,timeline:timelineMarkup,people:peopleMarkup,knowledge:knowledgeMarkup,conflicts:issuesMarkup,
+    const html=({home:homeMarkup,timeline:timelineMarkup,people:peoplePageMarkup,knowledge:knowledgeMarkup,conflicts:issuesMarkup,
       search:searchMarkup,remind:reminderMarkup,settings:settingsMarkup})[tab]();
     // Source view replaces the list. Previously it was appended after a long list and invisible on mobile Safari.
     content.innerHTML=ui.previewSource?sourceMarkup():(ui.edit?editingMarkup():html);
@@ -1328,7 +1383,7 @@
     if(!roomData)return setStatus('채팅방이 없습니다.');
     // Only the script's memory/summary results are backed up. Raw dialogue stays in IndexedDB.
     const archive={format:'zeta-memory-assistant',backupType:'memory-only',version:VERSION,
-      room:activeRoom,exportedAt:new Date().toISOString(),memory:roomData.memory};
+      room:activeRoom,exportedAt:new Date().toISOString(),memory:roomData.memory,profileSnapshot:roomData.profileSnapshot||null};
     exportJSON(`zeta-memory-${activeRoom.slice(0,8)}.json`,archive);
     setStatus('기억·요약 결과 JSON 백업 요청 · 대화 원문 및 API 키 제외');
   }
@@ -1346,6 +1401,7 @@
         throw new Error('파일에 복원할 기억·요약 결과가 없습니다.');
       if(!confirm('현재 채팅방의 기억·요약 결과를 백업 내용으로 대체할까요? 수집된 대화 원문은 유지됩니다.'))return;
       roomData.memory=ensureMemory(incoming);
+      if(data.backupType==='memory-only'&&data.profileSnapshot&&typeof data.profileSnapshot==='object')roomData.profileSnapshot=data.profileSnapshot;
       await saveRoom();
       ui.previewSource=null;
       setStatus('기억·요약 결과 복원 완료 · 대화 원문 유지 · 출처 확인은 로컬 수집 기록을 사용합니다.');
@@ -1453,6 +1509,8 @@
     const act=button.dataset.act,id=button.dataset.id,kind=button.dataset.kind;
     if(act==='tab'||act==='open-settings'){tab=act==='open-settings'?'settings':button.dataset.tab;ui.edit=null;ui.previewSource=null;render();content.scrollTop=0;return;}
     if(act==='close'){panel.hidden=true;return;}
+    if(act==='people-subtab'){ui.peopleSubtab=button.dataset.subtab==='profiles'?'profiles':'memory';ui.edit=null;ui.previewSource=null;render();content.scrollTop=0;return;}
+    if(act==='load-chat-profiles'){await loadChatProfiles();return;}
     if(act==='timeline-selection-toggle'){ui.timelineSelectionMode=!ui.timelineSelectionMode;ui.timelineSelection=[];render();return;}
     if(act==='timeline-select-clear'){ui.timelineSelection=[];render();return;}
     if(act==='timeline-select-all'){
@@ -1673,6 +1731,10 @@
       #zmm-panel .zmm-item{background:#292934;border:1px solid #43424f;border-radius:9px;padding:10px;margin:7px 0}
       #zmm-panel .zmm-item.zmm-warning{border-color:#b39a61}
       #zmm-panel .zmm-episode-title{display:block;font-size:13px;margin:1px 0 8px;color:#f3f0ff}
+      #zmm-panel .zmm-people-subtabs{display:flex;gap:6px;margin:0 0 13px}
+      #zmm-panel .zmm-people-subtabs button{flex:1}
+      #zmm-panel .zmm-people-subtabs button.active{background:#565269;border-color:#aaa5b8}
+      #zmm-panel .zmm-profile-description{max-height:none;overflow-wrap:anywhere;word-break:break-word;white-space:pre-wrap}
       #zmm-panel .zmm-timeline-select{display:flex;align-items:center;gap:8px;font-weight:600;padding:4px 0 8px}
       #zmm-panel [hidden]{display:none!important}
       #zmm-panel .zmm-sources{display:flex;gap:4px;flex-wrap:wrap;margin:7px 0}
