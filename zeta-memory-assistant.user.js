@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         제타 기억력 보조
 // @namespace    zeta-memory-assistant
-// @version      0.2.8
+// @version      0.2.9
 // @description  과거 대화 로컬 보관, Gemini 서사 기억, 모순 의심 표시, 정정·상기 복사, 기억 검색
 // @updateURL    https://raw.githubusercontent.com/casualJH/zeta-memory-assistant/main/zeta-memory-assistant.user.js
 // @downloadURL  https://raw.githubusercontent.com/casualJH/zeta-memory-assistant/main/zeta-memory-assistant.user.js
@@ -30,7 +30,7 @@
   'use strict';
   if (window.__zetaMemoryAssistantV1) return;
   window.__zetaMemoryAssistantV1 = true;
-  const VERSION = '0.2.8';
+  const VERSION = '0.2.9';
   const DB_NAME = 'zeta-memory-assistant-db-v1';
   const UUID = /^[0-9a-f]{8}-(?:[0-9a-f]{4}-){3}[0-9a-f]{12}$/i;
   const CHANNEL = 'zmm-' + Array.from(crypto.getRandomValues(new Uint8Array(12)), n => n.toString(16).padStart(2, '0')).join('');
@@ -1808,16 +1808,11 @@
         display:flex;flex-direction:column;background:#1d1d25;color:#f4f3f8;border:1px solid #676277;border-radius:15px;
         font:13px/1.5 system-ui;box-sizing:border-box;box-shadow:0 9px 34px #0009;color-scheme:dark}
       #zmm-panel[hidden]{display:none!important}#zmm-panel *{box-sizing:border-box}
-      #zmm-panel .zmm-resize-handle{position:absolute;width:26px;height:26px;z-index:10;touch-action:none;user-select:none;-webkit-user-select:none}
+      #zmm-panel .zmm-resize-handle{position:absolute;width:26px;height:26px;z-index:10;touch-action:none;user-select:none;-webkit-user-select:none;background:transparent;border:0;opacity:0}
       #zmm-panel .zmm-resize-handle[data-corner="tl"]{left:0;top:0;cursor:nwse-resize}
       #zmm-panel .zmm-resize-handle[data-corner="tr"]{right:0;top:0;cursor:nesw-resize}
       #zmm-panel .zmm-resize-handle[data-corner="bl"]{left:0;bottom:0;cursor:nesw-resize}
       #zmm-panel .zmm-resize-handle[data-corner="br"]{right:0;bottom:0;cursor:nwse-resize}
-      #zmm-panel .zmm-resize-handle::after{content:'';position:absolute;width:9px;height:9px;border:2px solid #aaa5b8;opacity:.85}
-      #zmm-panel .zmm-resize-handle[data-corner="tl"]::after{left:4px;top:4px;border-right:0;border-bottom:0}
-      #zmm-panel .zmm-resize-handle[data-corner="tr"]::after{right:4px;top:4px;border-left:0;border-bottom:0}
-      #zmm-panel .zmm-resize-handle[data-corner="bl"]::after{left:4px;bottom:4px;border-right:0;border-top:0}
-      #zmm-panel .zmm-resize-handle[data-corner="br"]::after{right:4px;bottom:4px;border-left:0;border-top:0}
       #zmm-panel button{font:600 12px/1.3 system-ui;color:#f8f8fa;background:#34343e;border:1px solid #656473;border-radius:7px;
         padding:8px 9px;cursor:pointer;min-height:32px}
       #zmm-panel button:disabled{opacity:.55;cursor:default}
