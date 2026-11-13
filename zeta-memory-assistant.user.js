@@ -127,14 +127,6 @@
       req.onsuccess=()=>resolve(req.result||[]);req.onerror=()=>reject(req.error);
     });
   }
-  async function dbReplaceRoomMessages(room,rows){
-    const db=await openDB();return new Promise((resolve,reject)=>{
-      const tx=db.transaction('messages','readwrite'),store=tx.objectStore('messages');
-      const req=store.index('room').openKeyCursor(IDBKeyRange.only(room));
-      req.onsuccess=()=>{const cur=req.result;if(cur){store.delete(cur.primaryKey);cur.continue();}else for(const row of rows)store.put(row);};
-      tx.oncomplete=()=>resolve();tx.onerror=()=>reject(tx.error);tx.onabort=()=>reject(tx.error);
-    });
-  }
   async function saveRoom(){if(!roomData)return;roomData.updatedAt=Date.now();await dbPut('rooms',roomData);}
   function orderedMessages(){return [...msgMap.values()].sort((a,b)=>{
     const ta=Date.parse(a.time)||0,tb=Date.parse(b.time)||0;
@@ -759,9 +751,6 @@
     const t=new Date(Date.UTC(+m[1],+m[2]-1,+m[3]));t.setUTCDate(t.getUTCDate()+advance);return t.toISOString().slice(0,10);
   }
   function prettyDate(s){if(!/^\d{4}-\d{2}-\d{2}$/.test(s||''))return s;const [y,m,d]=s.split('-');return `${y}년 ${+m}월 ${+d}일`;}
-  function hasTimeHint(text){
-    return /(?:\d{4}\s*년|\d{1,2}\s*월\s*\d{1,2}\s*일|다음\s*날|이튿날|며칠\s*뒤|며칠\s*후|\d+\s*(?:일|주|개월|년)\s*(?:후|뒤)|하루\s*(?:후|뒤)|이틀\s*(?:후|뒤)|사흘\s*(?:후|뒤)|며칠이\s*지나|시간이\s*흐른\s*뒤|다음\s*아침|며칠이\s*흘러)/.test(text);
-  }
   // Only advance D+N on text-backed, countable time cues; vague '며칠 후' is not an exact day.
   function explicitDayAdvance(text){
     const s=String(text||'');
@@ -776,12 +765,6 @@
   }
   function normalizeImportance(v){return ['critical','high','normal','low'].includes(v)?v:'normal';}
   function normalizedInfo(v,n=700){const text=ensureShort(v,n);return /^(?:null|undefined|none|unknown|n\/a|정보\s*없음)$/i.test(text)?'':text;}
-  function conversationPosition(id){
-    const row=msgMap.get(activeRoom+'|'+id)||findSource(id);
-    if(!row)return Number.MAX_SAFE_INTEGER;
-    const t=Date.parse(row.time);
-    return Number.isFinite(t)?t:Number.MAX_SAFE_INTEGER;
-  }
   function sourceIndexMap(){
     const index=new Map();
     orderedMessages().forEach((m,i)=>index.set(m.id,i));
