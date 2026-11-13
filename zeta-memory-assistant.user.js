@@ -57,7 +57,7 @@
   let lastLiveSync=0, latestTimer=0, updateTimer=0, currentBridgeRoom=null;
   let batchQueue=Promise.resolve();
   let runtimeStatus='대화방을 열어 주세요.';
-  let liveProfileSnapshot=null,profileLoadRequestedRoom=null;
+  let profileLoadRequestedRoom=null;
   let usageCache=null;
   let directControl=null;
   let bridgeDiagnostics={mode:'대기',roomSource:'없음',apiSeen:0,authorization:false};
@@ -205,7 +205,6 @@
     // Integrated profile collector: one room may contain several characters.
     // This runs inside the existing Safari-compatible page bridge.
     let profilePlot=null,profileUser=null,profileEpoch=0,profileCharacters=[];
-    const profileDetails=new Map(),plotDescriptions=new Map();
     function profileOf(raw){
       if(!raw||typeof raw!=='object'||Array.isArray(raw))return null;
       const first=keys=>keys.map(k=>raw[k]).find(v=>typeof v==='string'&&v.trim())||'';
@@ -240,7 +239,6 @@
     function currentProfiles(){
       return {roomId:room,plotId:profilePlot,characters:profileCharacters.slice(),user:profileUser};
     }
-    function sendProfiles(){if(room)emit('profile',{room,profile:currentProfiles()});}
     function collectVisibleDescriptions(){
       // In Zeta, a character-details modal can contain a longer description
       // than the room API. Only use a visible, uniquely identifiable modal.
@@ -265,21 +263,19 @@
           if(desc)matches.push({id:eligible[0].id,name:title,description:desc.slice(0,20000)});
         }
       }
-      if(matches.length===1){rememberCharacter(matches[0]);sendProfiles();}
+      if(matches.length===1)rememberCharacter(matches[0]);
     }
     function collectProfileDetails(body){
       if(!profileCharacters.length)return;
       const byId=new Set(profileCharacters.map(p=>p.id).filter(Boolean));
-      const stack=[{value:body,depth:0}];let count=0,changed=false;
+      const stack=[{value:body,depth:0}];let count=0;
       while(stack.length&&count++<1500){
         const {value,depth}=stack.pop();
         if(!value||typeof value!=='object'||depth>10)continue;
         if(!Array.isArray(value)&&byId.has(String(value.id||''))&&
             typeof value.description==='string'&&value.description.trim()){
           const id=String(value.id),description=value.description.slice(0,20000);
-          profileDetails.set(id,description);
           rememberCharacter({id,description});
-          changed=true;
         }
         if(depth===10)continue;
         for(const key of Object.keys(value).slice(0,100)){
@@ -288,7 +284,6 @@
             stack.push({value:value[key],depth:depth+1});
         }
       }
-      if(changed)sendProfiles();
     }
     function acceptProfiles(url,body){
       if(!room||!body||typeof body!=='object'||Array.isArray(body))return;
@@ -300,29 +295,25 @@
       if(isRoomDetail&&body.plot&&typeof body.plot==='object'){
         const plot=body.plot;
         if(profilePlot&&typeof plot.id==='string'&&plot.id!==profilePlot){
-          profileCharacters=[];profileDetails.clear();plotDescriptions.clear();
+          profileCharacters=[];
         }
         if(typeof plot.id==='string')profilePlot=plot.id;
         const candidates=Array.isArray(plot.characters)?plot.characters.map(profileOf).filter(Boolean):[];
         candidates.forEach(rememberCharacter);
-        sendProfiles();
       }
       if(/\/user-personas\/(select|selected)\/?$/i.test(path)){
         const user=profileOf(body);
         if(user)profileUser=sameProfile(profileUser,user)?mergeProfile(profileUser,user):user;
-        if(user)sendProfiles();
       }
       if(profilePlot&&path.replace(/\/$/,'')==='/v1/plots/'+profilePlot){
         const introductions=Array.isArray(body.about?.characters)?body.about.characters:[];
         for(const entry of introductions){
           if(typeof entry?.characterId==='string'&&typeof entry.description==='string'&&entry.description.trim()){
             const desc=entry.description.slice(0,20000);
-            plotDescriptions.set(entry.characterId,desc);
             if(profileCharacters.some(p=>p.id===entry.characterId))
               rememberCharacter({id:entry.characterId,description:desc});
           }
         }
-        if(introductions.length)sendProfiles();
       }
       if(isRoomDetail||/\/plots\/|profile|persona|character/i.test(path))
         collectProfileDetails(body);
@@ -365,7 +356,6 @@
       }catch(e){failed=true;}
       if(request!==profileEpoch||forRoom!==room)return;
       collectVisibleDescriptions();
-      sendProfiles();
       emit('profileComplete',{room,profile:currentProfiles()});
       if(failed)emit('profileNotice',{room,message:'일부 프로필 API 응답을 확인하지 못했습니다. 이전에 저장한 정보는 유지됩니다.'});
     }
@@ -393,7 +383,7 @@
     function setRoom(url){
       const match=roomPattern.exec(String(url));
       if(match&&valid.test(match[1])){
-        if(room!==match[1]){room=match[1];roomPath=currentPath();profilePlot=null;profileCharacters=[];profileUser=null;profileEpoch++;profileDetails.clear();plotDescriptions.clear();emit('room',{room,source:allowedUrl(url)?'api':'url'});}
+        if(room!==match[1]){room=match[1];roomPath=currentPath();profilePlot=null;profileCharacters=[];profileUser=null;profileEpoch++;emit('room',{room,source:allowedUrl(url)?'api':'url'});}
         return;
       }
       const path=roomPattern.exec(page.location.pathname);
@@ -506,7 +496,7 @@
         lastPath=path;
         const found=roomPattern.exec(page.location.pathname);
         if(found&&valid.test(found[1]))setRoom(page.location.href);
-        else if(roomPath!==path){room=null;roomPath=null;profilePlot=null;profileCharacters=[];profileUser=null;profileEpoch++;profileDetails.clear();plotDescriptions.clear();emit('room',{room:null,source:'navigation'});scanRecentRequests();}
+        else if(roomPath!==path){room=null;roomPath=null;profilePlot=null;profileCharacters=[];profileUser=null;profileEpoch++;emit('room',{room:null,source:'navigation'});scanRecentRequests();}
       }
       if(!room)scanRecentRequests();
     },900);
@@ -553,7 +543,7 @@
   async function changeRoom(room){
     ++syncEpoch;analysisStop=true;analysisBusy=false;syncBusy=false;
     clearTimeout(latestTimer);clearTimeout(updateTimer);
-    activeRoom=room;msgMap=new Map();roomData=null;ui.previewSource=null;ui.peopleSubtab='memory';liveProfileSnapshot=null;profileLoadRequestedRoom=null;
+    activeRoom=room;msgMap=new Map();roomData=null;ui.previewSource=null;ui.peopleSubtab='memory';profileLoadRequestedRoom=null;
     if(!room){setStatus('제타 채팅방을 열어 주세요.');render();return;}
     try{
       const loaded=await Promise.all([dbGet('rooms',room),dbRoomMessages(room)]);
@@ -608,13 +598,8 @@
     else if(d.type==='room'){currentBridgeRoom=d.room||null;if(d.room!==activeRoom)await changeRoom(d.room);}
     else if(d.type==='state'){if(d.room&&d.room!==activeRoom)await changeRoom(d.room);setStatus(d.authorized?'제타 인증 확인됨':'채팅 화면의 메시지가 로딩될 때까지 대기 중');}
     else if(d.type==='auth'){if(d.room&&d.room===activeRoom){if(!roomData?.fullyLoaded)setStatus('제타 인증 확인됨 · 전체 대화 불러오기를 누르세요.');}}
-    else if(d.type==='profile'){
-      if(d.room!==activeRoom)return;
-      liveProfileSnapshot=d.profile||null;
-    }
     else if(d.type==='profileComplete'){
       if(d.room!==activeRoom)return;
-      liveProfileSnapshot=d.profile||null;
       if(profileLoadRequestedRoom===activeRoom){
         profileLoadRequestedRoom=null;
         await saveDetectedProfiles(d.profile);
