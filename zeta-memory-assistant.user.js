@@ -1,10 +1,11 @@
 // ==UserScript==
 // @name         제타 기억력 보조
 // @namespace    zeta-memory-assistant
-// @version      0.2.9
+// @version      0.2.10
 // @description  과거 대화 로컬 보관, Gemini 서사 기억, 모순 의심 표시, 정정·상기 복사, 기억 검색
 // @updateURL    https://raw.githubusercontent.com/casualJH/zeta-memory-assistant/main/zeta-memory-assistant.user.js
 // @downloadURL  https://raw.githubusercontent.com/casualJH/zeta-memory-assistant/main/zeta-memory-assistant.user.js
+// @homepageURL   https://github.com/casualJH/zeta-memory-assistant
 // @author       zeta-memory-assistant
 // @match        https://zeta-ai.io/*
 // @match        https://*.zeta-ai.io/*
@@ -30,7 +31,7 @@
   'use strict';
   if (window.__zetaMemoryAssistantV1) return;
   window.__zetaMemoryAssistantV1 = true;
-  const VERSION = '0.2.9';
+  const VERSION = '0.2.10';
   const DB_NAME = 'zeta-memory-assistant-db-v1';
   const UUID = /^[0-9a-f]{8}-(?:[0-9a-f]{4}-){3}[0-9a-f]{12}$/i;
   const CHANNEL = 'zmm-' + Array.from(crypto.getRandomValues(new Uint8Array(12)), n => n.toString(16).padStart(2, '0')).join('');
@@ -1094,15 +1095,14 @@
   function profileSnapshotMarkup(){
     const snapshot=roomData?.profileSnapshot;
     const cards=snapshot?[
-      ['현재 캐릭터',snapshot.character],
-      ['채팅 프로필',snapshot.chatProfile],
-      ['유저 프로필',snapshot.user]
+      ['등장인물',snapshot.character],
+      ['유저',snapshot.user]
     ]:[];
     const profileCards=cards.map(([heading,p])=>p
       ?`<article class="zmm-item"><h4>${esc(heading)}</h4><strong>${esc(p.name||'이름 미확인')}</strong>
         ${p.description?`<pre class="zmm-profile-description">${esc(p.description)}</pre>`:'<p class="zmm-muted">프로필 설명 없음</p>'}</article>`
       :`<article class="zmm-item"><h4>${esc(heading)}</h4><p class="zmm-muted">이 프로필은 수집되지 않았습니다.</p></article>`).join('');
-    return `${cardHeading('대화 프로필','내장된 프로필 감지 기능으로 현재 채팅방의 프로필을 불러와 저장합니다. 별도 스크립트는 필요 없습니다.')}
+    return `${cardHeading('대화 프로필','내장된 프로필 감지 기능으로 등장인물과 유저 프로필을 불러와 저장합니다. 별도 스크립트는 필요 없습니다.')}
       <div class="zmm-row"><button class="zmm-main" data-act="load-chat-profiles">${snapshot?'대화 프로필 다시 불러오기':'대화 프로필 불러오기'}</button></div>
       ${snapshot?`<p class="zmm-muted">저장됨 · ${esc(new Date(snapshot.savedAt).toLocaleString('ko-KR'))} · 이 채팅방에만 적용</p>`:
         '<div class="zmm-empty">저장된 대화 프로필이 없습니다. 위 버튼을 눌러 제타의 프로필 정보를 불러와 주세요.</div>'}
@@ -1111,12 +1111,11 @@
   async function saveDetectedProfiles(current){
     if(!activeRoom||!roomData)return;
     const character=safeProfileData(current?.character);
-    const chatProfile=safeProfileData(current?.chatProfile);
     const user=safeProfileData(current?.user);
-    if(!character&&!chatProfile&&!user)
+    if(!character&&!user)
       return setStatus('현재 프로필을 찾지 못했습니다. 제타에서 프로필 상세 화면을 열고 다시 눌러 주세요.');
     const room=activeRoom,previous=roomData.profileSnapshot;
-    roomData.profileSnapshot={character,chatProfile,user,savedAt:Date.now()};
+    roomData.profileSnapshot={character,user,savedAt:Date.now()};
     try{
       await saveRoom();
       if(room!==activeRoom)return;
