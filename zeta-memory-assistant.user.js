@@ -265,6 +265,20 @@
       }
       if(matches.length===1)rememberCharacter(matches[0]);
     }
+    function watchProfileModals(){
+      const doc=page.document;
+      if(!doc?.body||typeof page.MutationObserver!=='function')return;
+      let pending=false;
+      const observer=new page.MutationObserver(()=>{
+        if(!room||!profileCharacters.length||pending)return;
+        if(!doc.querySelector('[data-sentry-component="CharacterDescription"]'))return;
+        pending=true;
+        const schedule=typeof page.requestAnimationFrame==='function'?
+          page.requestAnimationFrame.bind(page):(fn=>Promise.resolve().then(fn));
+        schedule(()=>{pending=false;collectVisibleDescriptions();});
+      });
+      observer.observe(doc.body,{childList:true,subtree:true});
+    }
     function collectProfileDetails(body){
       if(!profileCharacters.length)return;
       const byId=new Set(profileCharacters.map(p=>p.id).filter(Boolean));
@@ -380,16 +394,24 @@
         }
       }catch(e){}
     }
+    function switchRoom(next,source){
+      if(!next||!valid.test(next)||room===next)return;
+      // If Zeta's current URL identifies a room, disregard stale API traffic
+      // from another room (including late responses after SPA navigation).
+      const visible=roomPattern.exec(page.location.pathname);
+      if(visible&&valid.test(visible[1])&&visible[1]!==next)return;
+      room=next;roomPath=currentPath();
+      profilePlot=null;profileCharacters=[];profileUser=null;profileEpoch++;
+      emit('room',{room,source});
+    }
     function setRoom(url){
       const match=roomPattern.exec(String(url));
       if(match&&valid.test(match[1])){
-        if(room!==match[1]){room=match[1];roomPath=currentPath();profilePlot=null;profileCharacters=[];profileUser=null;profileEpoch++;emit('room',{room,source:allowedUrl(url)?'api':'url'});}
+        switchRoom(match[1],allowedUrl(url)?'api':'url');
         return;
       }
       const path=roomPattern.exec(page.location.pathname);
-      if(path&&valid.test(path[1])&&room!==path[1]){
-        room=path[1];roomPath=currentPath();emit('room',{room,source:'path'});
-      }
+      if(path&&valid.test(path[1]))switchRoom(path[1],'path');
     }
     function keep(h){
       const collected={};for(const [key,value] of entries(h)){
@@ -490,6 +512,9 @@
     scanRecentRequests();
     page.__zmmBridgeV1={channel,get room(){return room;},get authorized(){return !!headers?.authorization;},control};
     emit('ready',{room,authorized:!!headers?.authorization,mode:typeof sink==='function'?'direct':'postMessage'});
+    if(page.document?.readyState==='loading')
+      page.document.addEventListener('DOMContentLoaded',watchProfileModals,{once:true});
+    else watchProfileModals();
     setInterval(()=>{
       const path=currentPath();
       if(path!==lastPath){
