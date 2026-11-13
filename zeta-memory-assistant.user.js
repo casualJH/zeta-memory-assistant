@@ -210,74 +210,140 @@
     let headers=null,room=null,aborter=null,running=false,epoch=0,lastPath=page.location.pathname+page.location.search;
     const oldFetch=page.fetch,oldOpen=page.XMLHttpRequest.prototype.open,oldHeader=page.XMLHttpRequest.prototype.setRequestHeader,oldSend=page.XMLHttpRequest.prototype.send;
     const xhrState=new WeakMap();
-    // Built-in counterpart of the user's zeta-current-profiles collector.
-    let profilePlot=null,profileCharacter=null,profileChat=null,profileUser=null,profileEpoch=0;
+    // Integrated profile collector: one room may contain several characters.
+    // This runs inside the existing Safari-compatible page bridge.
+    let profilePlot=null,profileUser=null,profileEpoch=0,profileCharacters=[];
     const profileDetails=new Map(),plotDescriptions=new Map();
     function profileOf(raw){
-      if(!raw||typeof raw!=='object')return null;
+      if(!raw||typeof raw!=='object'||Array.isArray(raw))return null;
       const first=keys=>keys.map(k=>raw[k]).find(v=>typeof v==='string'&&v.trim())||'';
       const name=first(['name','displayName','display_name','nickname','title']);
       const description=typeof raw.description==='string'?raw.description:'';
-      const id=['id','uuid','profileId','profile_id','characterId','character_id'].map(k=>raw[k])
-        .find(v=>typeof v==='string'||typeof v==='number');
+      const id=['id','uuid','profileId','profile_id','characterId','character_id']
+        .map(k=>raw[k]).find(v=>typeof v==='string'||typeof v==='number');
       if(!name&&!description)return null;
-      return {name:name.slice(0,160),description:description.slice(0,20000),
-        id:id==null?'':String(id).slice(0,120)};
+      return {id:id==null?'':String(id).slice(0,120),name:name.slice(0,160),
+        description:description.slice(0,20000)};
     }
-    function sendProfiles(){
-      if(room)emit('profile',{room,profile:{roomId:room,character:profileCharacter,
-        chatProfile:profileChat,user:profileUser}});
+    function sameProfile(a,b){
+      return !!(a&&b&&((a.id&&b.id&&a.id===b.id)||
+        ((!a.id||!b.id)&&a.name&&b.name&&a.name.trim()===b.name.trim())));
+    }
+    function mergeProfile(previous,incoming){
+      if(!previous)return incoming;
+      if(!incoming)return previous;
+      // Never replace a nonempty field with missing or blank API data.
+      const result={...previous};
+      for(const key of ['id','name','description']){
+        if(typeof incoming[key]==='string'&&incoming[key].trim())result[key]=incoming[key];
+      }
+      return result;
+    }
+    function rememberCharacter(data){
+      if(!data)return;
+      const index=profileCharacters.findIndex(p=>sameProfile(p,data));
+      if(index>=0)profileCharacters[index]=mergeProfile(profileCharacters[index],data);
+      else profileCharacters.push(data);
+    }
+    function currentProfiles(){
+      return {roomId:room,characters:profileCharacters.slice(),user:profileUser};
+    }
+    function sendProfiles(){if(room)emit('profile',{room,profile:currentProfiles()});}
+    function collectVisibleDescriptions(){
+      // In Zeta, a character-details modal can contain a longer description
+      // than the room API. Only use a visible, uniquely identifiable modal.
+      const doc=page.document;
+      if(!doc)return;
+      const matches=[];
+      for(const heading of doc.querySelectorAll('h3,[role="heading"]')){
+        if(heading.closest('#zmm-panel'))continue;
+        const title=String(heading.textContent||'').trim();
+        if(!title)continue;
+        const header=heading.parentElement;
+        if(!header?.querySelector('button[aria-label="Close"],button[aria-label="닫기"]'))continue;
+        const overlay=header.parentElement;
+        if(!overlay||overlay.closest('[hidden],[aria-hidden="true"]'))continue;
+        const all=Array.from(overlay.querySelectorAll('[data-sentry-component="CharacterDescription"] .whitespace-pre-wrap'));
+        const fallback=all.length?all:Array.from(overlay.querySelectorAll('.whitespace-pre-wrap'));
+        const eligible=profileCharacters.filter(p=>p.name.trim()===title);
+        if(eligible.length!==1)continue;
+        for(const el of fallback){
+          if(!el.getClientRects().length||el.closest('[hidden],[aria-hidden="true"]'))continue;
+          const desc=String(el.innerText||'').trim();
+          if(desc)matches.push({id:eligible[0].id,name:title,description:desc.slice(0,20000)});
+        }
+      }
+      if(matches.length===1){rememberCharacter(matches[0]);sendProfiles();}
+    }
+    function collectProfileDetails(body){
+      if(!profileCharacters.length)return;
+      const byId=new Set(profileCharacters.map(p=>p.id).filter(Boolean));
+      const stack=[{value:body,depth:0}];let count=0,changed=false;
+      while(stack.length&&count++<1500){
+        const {value,depth}=stack.pop();
+        if(!value||typeof value!=='object'||depth>10)continue;
+        if(!Array.isArray(value)&&byId.has(String(value.id||''))&&
+            typeof value.description==='string'&&value.description.trim()){
+          const id=String(value.id),description=value.description.slice(0,20000);
+          profileDetails.set(id,description);
+          rememberCharacter({id,description});
+          changed=true;
+        }
+        if(depth===10)continue;
+        for(const key of Object.keys(value).slice(0,100)){
+          if(/auth|token|cookie|password|secret|email|phone/i.test(key))continue;
+          if(value[key]&&typeof value[key]==='object')
+            stack.push({value:value[key],depth:depth+1});
+        }
+      }
+      if(changed)sendProfiles();
     }
     function acceptProfiles(url,body){
       if(!room||!body||typeof body!=='object'||Array.isArray(body))return;
-      let path;try{const u=new page.URL(url,page.location.href);if(u.origin!==api)return;path=u.pathname;}catch{return;}
+      let path;
+      try{const u=new page.URL(url,page.location.href);if(u.origin!==api)return;path=u.pathname;}catch{return;}
       const match=/\/rooms\/([0-9a-f-]{36})(?:\/|$)/i.exec(path);
       if(match&&match[1]!==room)return;
-      if(path==='/v1/rooms/'+room){
-        const plot=body.plot;if(plot&&typeof plot==='object'){
-          profilePlot=typeof plot.id==='string'?plot.id:null;
-          const characters=Array.isArray(plot.characters)?plot.characters.map(profileOf).filter(Boolean):[];
-          profileCharacter=characters.length===1?characters[0]:null;
-          const chats=Array.isArray(plot.chatProfiles)?plot.chatProfiles.map(profileOf).filter(Boolean):[];
-          profileChat=chats.length===1?chats[0]:null;
-          sendProfiles();
+      const isRoomDetail=path.replace(/\/$/,'')==='/v1/rooms/'+room;
+      if(isRoomDetail&&body.plot&&typeof body.plot==='object'){
+        const plot=body.plot;
+        if(profilePlot&&typeof plot.id==='string'&&plot.id!==profilePlot){
+          profileCharacters=[];profileDetails.clear();plotDescriptions.clear();
         }
+        if(typeof plot.id==='string')profilePlot=plot.id;
+        const candidates=Array.isArray(plot.characters)?plot.characters.map(profileOf).filter(Boolean):[];
+        candidates.forEach(rememberCharacter);
+        sendProfiles();
       }
       if(/\/user-personas\/(select|selected)\/?$/i.test(path)){
-        const user=profileOf(body);if(user){profileUser=user;sendProfiles();}
+        const user=profileOf(body);
+        if(user)profileUser=sameProfile(profileUser,user)?mergeProfile(profileUser,user):user;
+        if(user)sendProfiles();
       }
       if(profilePlot&&path.replace(/\/$/,'')==='/v1/plots/'+profilePlot){
-        for(const entry of Array.isArray(body.about?.characters)?body.about.characters:[]){
-          if(typeof entry?.characterId==='string'&&typeof entry?.description==='string')
-            plotDescriptions.set(entry.characterId,entry.description.slice(0,20000));
-        }
-        if(profileCharacter?.id&&plotDescriptions.has(profileCharacter.id)){
-          profileCharacter={...profileCharacter,description:plotDescriptions.get(profileCharacter.id)};
-          sendProfiles();
-        }
-      }
-      // Match only actual IDs in observed API responses, without guessing fields.
-      if(profileCharacter?.id&&!/\/messages(?:\/|$)/i.test(path)){
-        const stack=[body];let n=0;
-        while(stack.length&&n++<1500){
-          const value=stack.pop();if(!value||typeof value!=='object')continue;
-          if(!Array.isArray(value)&&String(value.id||'')===profileCharacter.id&&
-             typeof value.description==='string'&&value.description.trim())
-            profileDetails.set(profileCharacter.id,value.description.slice(0,20000));
-          for(const key of Object.keys(value).slice(0,100)){
-            if(/auth|token|cookie|password|secret|email|phone/i.test(key))continue;
-            if(value[key]&&typeof value[key]==='object')stack.push(value[key]);
+        const introductions=Array.isArray(body.about?.characters)?body.about.characters:[];
+        for(const entry of introductions){
+          if(typeof entry?.characterId==='string'&&typeof entry.description==='string'&&entry.description.trim()){
+            const desc=entry.description.slice(0,20000);
+            plotDescriptions.set(entry.characterId,desc);
+            if(profileCharacters.some(p=>p.id===entry.characterId))
+              rememberCharacter({id:entry.characterId,description:desc});
           }
         }
-        if(profileDetails.has(profileCharacter.id)){
-          profileCharacter={...profileCharacter,description:profileDetails.get(profileCharacter.id)};
-          sendProfiles();
-        }
+        if(introductions.length)sendProfiles();
       }
+      if(isRoomDetail||/\/plots\/|profile|persona|character/i.test(path))
+        collectProfileDetails(body);
+    }
+    function profileEndpoint(url){
+      let path;
+      try{const u=new page.URL(String(url),page.location.href);if(u.origin!==api)return false;path=u.pathname;}catch{return false;}
+      if(/\/(messages|events|recommended-messages|settings|model-setting)(?:\/|$)/i.test(path))return false;
+      return /^\/v1\/rooms\/[0-9a-f-]{36}\/?$/i.test(path)||
+        /\/plots\/|profile|persona|character/i.test(path);
     }
     function captureProfileResponse(url,response){
-      if(!response?.ok||!/\/rooms\/|\/plots\/|profile|persona|character/i.test(url)||
-        /\/messages(?:\?|$)/i.test(url))return;
+      if(!response?.ok||!profileEndpoint(url))return;
       if(Number(response.headers?.get('content-length')||0)>900000)return;
       response.clone().text().then(t=>{
         if(t.length<=900000)try{acceptProfiles(url,JSON.parse(t));}catch{}
@@ -287,24 +353,29 @@
       setRoom(page.location.href);scanRecentRequests();
       if(!room)return emit('profileError',{message:'채팅방 ID 미확인'});
       const forRoom=room,request=++profileEpoch;
+      collectVisibleDescriptions();
       if(!headers?.authorization){
-        sendProfiles();emit('profileComplete',{room,profile:{roomId:room,character:profileCharacter,chatProfile:profileChat,user:profileUser}});return emit('profileNotice',{room,message:'제타 인증 정보 감지 전입니다. 채팅방을 새로고침해 주세요.'});
+        emit('profileComplete',{room,profile:currentProfiles()});
+        return emit('profileNotice',{room,message:'제타 인증 정보 감지 전입니다. 채팅방을 새로고침해 주세요.'});
       }
+      let failed=false;
       try{
         const url=api+'/v1/rooms/'+forRoom;
         const res=await oldFetch.call(page,url,{headers:{...headers},credentials:'include',cache:'no-store'});
         if(request!==profileEpoch||forRoom!==room)return;
-        if(res.ok)acceptProfiles(url,await res.json());
+        if(res.ok)acceptProfiles(url,await res.json());else failed=true;
         if(profilePlot){
           const plotUrl=api+'/v1/plots/'+profilePlot;
           const pr=await oldFetch.call(page,plotUrl,{headers:{...headers},credentials:'include',cache:'no-store'});
           if(request!==profileEpoch||forRoom!==room)return;
-          if(pr.ok)acceptProfiles(plotUrl,await pr.json());
+          if(pr.ok)acceptProfiles(plotUrl,await pr.json());else failed=true;
         }
-        sendProfiles();emit('profileComplete',{room,profile:{roomId:room,character:profileCharacter,chatProfile:profileChat,user:profileUser}});
-      }catch(e){if(request===profileEpoch&&forRoom===room){
-        sendProfiles();emit('profileComplete',{room,profile:{roomId:room,character:profileCharacter,chatProfile:profileChat,user:profileUser}});emit('profileNotice',{room,message:'프로필 API 확인 실패: '+String(e.message||e)});
-      }}
+      }catch(e){failed=true;}
+      if(request!==profileEpoch||forRoom!==room)return;
+      collectVisibleDescriptions();
+      sendProfiles();
+      emit('profileComplete',{room,profile:currentProfiles()});
+      if(failed)emit('profileNotice',{room,message:'일부 프로필 API 응답을 확인하지 못했습니다. 이전에 저장한 정보는 유지됩니다.'});
     }
     const emit=(type,data={})=>{
       const message={tag:'zmm-page',channel,type,...data};
@@ -330,7 +401,7 @@
     function setRoom(url){
       const match=roomPattern.exec(String(url));
       if(match&&valid.test(match[1])){
-        if(room!==match[1]){room=match[1];roomPath=currentPath();profilePlot=null;profileCharacter=null;profileChat=null;profileUser=null;profileEpoch++;profileDetails.clear();plotDescriptions.clear();emit('room',{room,source:allowedUrl(url)?'api':'url'});}
+        if(room!==match[1]){room=match[1];roomPath=currentPath();profilePlot=null;profileCharacters=[];profileUser=null;profileEpoch++;profileDetails.clear();plotDescriptions.clear();emit('room',{room,source:allowedUrl(url)?'api':'url'});}
         return;
       }
       const path=roomPattern.exec(page.location.pathname);
@@ -370,7 +441,7 @@
       if(/\/messages(?:[?#]|$)/i.test(s.url))this.addEventListener('load',()=>{
         try{const data=JSON.parse(this.responseText);if(Array.isArray(data.messages))emit('batch',{room,messages:data.messages,source:'live'});}catch{}
       },{once:true});
-      else if(/\/rooms\/|\/plots\/|profile|persona|character/i.test(s.url))
+      else if(profileEndpoint(s.url))
         this.addEventListener('load',()=>{
           try{
             if(this.status<200||this.status>=300)return;
@@ -443,7 +514,7 @@
         lastPath=path;
         const found=roomPattern.exec(page.location.pathname);
         if(found&&valid.test(found[1]))setRoom(page.location.href);
-        else if(roomPath!==path){room=null;roomPath=null;profilePlot=null;profileCharacter=null;profileChat=null;profileUser=null;profileEpoch++;profileDetails.clear();plotDescriptions.clear();emit('room',{room:null,source:'navigation'});scanRecentRequests();}
+        else if(roomPath!==path){room=null;roomPath=null;profilePlot=null;profileCharacters=[];profileUser=null;profileEpoch++;profileDetails.clear();plotDescriptions.clear();emit('room',{room:null,source:'navigation'});scanRecentRequests();}
       }
       if(!room)scanRecentRequests();
     },900);
