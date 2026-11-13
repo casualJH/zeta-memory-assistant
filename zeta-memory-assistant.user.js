@@ -246,7 +246,7 @@
       else profileCharacters.push(data);
     }
     function currentProfiles(){
-      return {roomId:room,characters:profileCharacters.slice(),user:profileUser};
+      return {roomId:room,plotId:profilePlot,characters:profileCharacters.slice(),user:profileUser};
     }
     function sendProfiles(){if(room)emit('profile',{room,profile:currentProfiles()});}
     function collectVisibleDescriptions(){
@@ -1023,18 +1023,18 @@
     });
   }
   function analysisProfileReference(){
-    // These are optional, per-room user-loaded reference snapshots, not story evidence.
-    // Only the character and user sections are forwarded; legacy chatProfile is excluded.
+    // Imported profiles are background context, never evidence of story events.
     const saved=roomData?.profileSnapshot;
     if(!saved||typeof saved!=='object')return '[불러온 프로필 없음]';
-    const data=[];
-    for(const [label,raw] of [['등장인물',saved.character],['유저',saved.user]]){
-      if(!raw||typeof raw!=='object')continue;
-      const name=typeof raw.name==='string'?raw.name.slice(0,160):'';
-      const description=typeof raw.description==='string'?raw.description.slice(0,20000):'';
-      if(name.trim()||description.trim())data.push({type:label,name,description});
-    }
-    return data.length?JSON.stringify(data):'[불러온 프로필 없음]';
+    const entries=savedCharacters(saved).slice(0,24).map(p=>({type:'등장인물',profile:p}));
+    const user=safeProfileData(saved.user);
+    if(user)entries.push({type:'유저',profile:user});
+    if(!entries.length)return '[불러온 프로필 없음]';
+    // Prevent a large cast of profiles from crowding out the actual dialogue.
+    const perProfile=Math.min(12000,Math.max(1000,Math.floor(30000/entries.length)));
+    return JSON.stringify(entries.map(({type,profile})=>({
+      type,name:profile.name,description:profile.description.slice(0,perProfile)
+    })));
   }
   function analysisPrompt(rows){
     const payload=rows.map((m,i)=>({id:m.id,order:i,speaker:m.speaker,role:m.role,kind:m.kind,text:m.text.slice(0,18000)}));
@@ -1185,39 +1185,87 @@
       snapshot+tools+(blocks.join('')||'<div class="zmm-empty">아직 서사 기록이 없습니다.</div>');
   }
   function safeProfileData(raw){
-    if(!raw||typeof raw!=='object')return null;
+    if(!raw||typeof raw!=='object'||Array.isArray(raw))return null;
     const pick=(value,max)=>typeof value==='string'?value.slice(0,max):'';
-    return {name:pick(raw.name,160),description:pick(raw.description,20000),
-      image:pick(raw.image,1200),id:raw.id==null?'':String(raw.id).slice(0,120)};
+    const data={name:pick(raw.name,160),description:pick(raw.description,20000),
+      id:raw.id==null?'':String(raw.id).slice(0,120)};
+    return data.name.trim()||data.description.trim()?data:null;
+  }
+  function sameSavedProfile(a,b){
+    return !!(a&&b&&((a.id&&b.id&&a.id===b.id)||
+      ((!a.id||!b.id)&&a.name&&b.name&&a.name.trim()===b.name.trim())));
+  }
+  function mergeSavedProfile(previous,updated){
+    if(!previous)return updated;
+    if(!updated)return previous;
+    const merged={...previous};
+    for(const key of ['id','name','description']){
+      if(typeof updated[key]==='string'&&updated[key].trim())merged[key]=updated[key];
+    }
+    return merged;
+  }
+  function savedCharacters(snapshot){
+    // v0.2.x stored a single character; v0.3.0 supports an array.
+    const entries=Array.isArray(snapshot?.characters)&&snapshot.characters.length?
+      snapshot.characters:(snapshot?.character?[snapshot.character]:[]);
+    const all=[];
+    for(const raw of entries){
+      const profile=safeProfileData(raw);
+      if(!profile)continue;
+      const index=all.findIndex(old=>sameSavedProfile(old,profile));
+      if(index>=0)all[index]=mergeSavedProfile(all[index],profile);
+      else all.push(profile);
+    }
+    return all;
   }
   function profileSnapshotMarkup(){
     const snapshot=roomData?.profileSnapshot;
-    const cards=snapshot?[
-      ['등장인물',snapshot.character],
-      ['유저',snapshot.user]
-    ]:[];
-    const profileCards=cards.map(([heading,p])=>p
-      ?`<article class="zmm-item"><h4>${esc(heading)}</h4><strong>${esc(p.name||'이름 미확인')}</strong>
-        ${p.description?`<pre class="zmm-profile-description">${esc(p.description)}</pre>`:'<p class="zmm-muted">프로필 설명 없음</p>'}</article>`
-      :`<article class="zmm-item"><h4>${esc(heading)}</h4><p class="zmm-muted">이 프로필은 수집되지 않았습니다.</p></article>`).join('');
-    return `${cardHeading('대화 프로필','내장된 프로필 감지 기능으로 등장인물과 유저 프로필을 불러와 저장합니다. 별도 스크립트는 필요 없습니다.')}
-      <div class="zmm-row"><button class="zmm-main" data-act="load-chat-profiles">${snapshot?'대화 프로필 다시 불러오기':'대화 프로필 불러오기'}</button></div>
-      ${snapshot?`<p class="zmm-muted">저장됨 · ${esc(new Date(snapshot.savedAt).toLocaleString('ko-KR'))} · 이 채팅방에만 적용</p>`:
-        '<div class="zmm-empty">저장된 대화 프로필이 없습니다. 위 버튼을 눌러 제타의 프로필 정보를 불러와 주세요.</div>'}
-      ${profileCards}`;
+    const characters=savedCharacters(snapshot),user=safeProfileData(snapshot?.user);
+    const display=(heading,profile)=>profile
+      ?'<article class="zmm-item"><h4>'+esc(heading)+'</h4><strong>'+esc(profile.name||'이름 미확인')+'</strong>'+
+        (profile.description?'<pre class="zmm-profile-description">'+esc(profile.description)+'</pre>':
+          '<p class="zmm-muted">프로필 설명 없음</p>')+'</article>'
+      :'<article class="zmm-item"><h4>'+esc(heading)+'</h4><p class="zmm-muted">아직 수집되지 않았습니다.</p></article>';
+    const characterCards=characters.map((p,i)=>display('등장인물 '+(i+1),p)).join('');
+    const stamp=Number.isFinite(snapshot?.savedAt)?
+      new Date(snapshot.savedAt).toLocaleString('ko-KR'):'저장된 프로필';
+    return cardHeading('대화 프로필','내장된 감지 기능으로 등장인물·유저 프로필을 불러와 채팅방별로 보관합니다. 별도 스크립트는 필요 없습니다.')+
+      '<div class="zmm-row"><button class="zmm-main" data-act="load-chat-profiles">'+
+        (snapshot?'대화 프로필 다시 불러오기':'대화 프로필 불러오기')+'</button></div>'+
+      (snapshot?'<p class="zmm-muted">저장됨 · '+esc(stamp)+' · 이 채팅방에만 적용</p>':
+        '<div class="zmm-empty">저장된 대화 프로필이 없습니다. 제타 채팅방에서 위 버튼을 눌러 주세요.</div>')+
+      '<h4>등장인물 · '+characters.length+'명</h4>'+
+      (characterCards||'<p class="zmm-muted">등장인물 설명을 불러오지 못했습니다. 캐릭터 상세 화면을 열고 다시 시도할 수 있습니다.</p>')+
+      '<h4>유저</h4>'+display('유저 프로필',user);
   }
   async function saveDetectedProfiles(current){
     if(!activeRoom||!roomData)return;
-    const character=safeProfileData(current?.character);
-    const user=safeProfileData(current?.user);
-    if(!character&&!user)
-      return setStatus('현재 프로필을 찾지 못했습니다. 제타에서 프로필 상세 화면을 열고 다시 눌러 주세요.');
+    const fresh=Array.isArray(current?.characters)?current.characters:
+      (current?.character?[current.character]:[]);
+    const incoming=fresh.map(safeProfileData).filter(Boolean);
+    const latestUser=safeProfileData(current?.user);
+    if(!incoming.length&&!latestUser)
+      return setStatus('새 프로필 정보를 찾지 못했습니다. 기존에 저장된 프로필은 유지됩니다.');
     const room=activeRoom,previous=roomData.profileSnapshot;
-    roomData.profileSnapshot={character,user,savedAt:Date.now()};
+    const plotChanged=!!(previous?.plotId&&current?.plotId&&previous.plotId!==current.plotId);
+    const characters=plotChanged?[]:savedCharacters(previous);
+    for(const next of incoming){
+      const index=characters.findIndex(old=>sameSavedProfile(old,next));
+      if(index>=0)characters[index]=mergeSavedProfile(characters[index],next);
+      else characters.push(next);
+    }
+    const existingUser=plotChanged?null:safeProfileData(previous?.user);
+    const user=latestUser?
+      (sameSavedProfile(existingUser,latestUser)?mergeSavedProfile(existingUser,latestUser):latestUser):
+      existingUser;
+    const update={characters,character:characters.length===1?characters[0]:null,
+      user:user||null,plotId:typeof current?.plotId==='string'?current.plotId:(previous?.plotId||null),
+      savedAt:Date.now()};
+    roomData.profileSnapshot=update;
     try{
       await saveRoom();
       if(room!==activeRoom)return;
-      render();setStatus('대화 프로필 저장 완료 · 새로고침 후에도 유지됩니다.');
+      render();setStatus('대화 프로필 저장 완료 · 등장인물 '+characters.length+'명 · 기존 미수집 정보 유지');
     }catch(e){
       if(room===activeRoom)roomData.profileSnapshot=previous;
       setStatus('대화 프로필 저장 실패: '+String(e.message||e));
@@ -1226,7 +1274,7 @@
   async function loadChatProfiles(){
     if(!activeRoom||!roomData)return setStatus('채팅방을 먼저 열어 주세요.');
     profileLoadRequestedRoom=activeRoom;
-    setStatus('내장 프로필 감지 기능으로 프로필 불러오는 중…');
+    setStatus('내장 프로필 감지 기능으로 등장인물·유저 프로필 불러오는 중…');
     sendBridge('profiles');
   }
   function peoplePageMarkup(){
