@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         제타 기억력 보조
 // @namespace    zeta-memory-assistant
-// @version      0.3.0
+// @version      0.3.1
 // @description  과거 대화 로컬 보관, Gemini 서사 기억, 모순 의심 표시, 정정·상기 복사, 기억 검색
 // @updateURL    https://raw.githubusercontent.com/casualJH/zeta-memory-assistant/main/zeta-memory-assistant.user.js
 // @downloadURL  https://raw.githubusercontent.com/casualJH/zeta-memory-assistant/main/zeta-memory-assistant.user.js
@@ -31,7 +31,7 @@
   'use strict';
   if (window.__zetaMemoryAssistantV1) return;
   window.__zetaMemoryAssistantV1 = true;
-  const VERSION = '0.3.0';
+  const VERSION = '0.3.1';
   const DB_NAME = 'zeta-memory-assistant-db-v1';
   const UUID = /^[0-9a-f]{8}-(?:[0-9a-f]{4}-){3}[0-9a-f]{12}$/i;
   const CHANNEL = 'zmm-' + Array.from(crypto.getRandomValues(new Uint8Array(12)), n => n.toString(16).padStart(2, '0')).join('');
@@ -180,9 +180,14 @@
         const text=kind==='info_box'?readInfoBox(c):typeof c.text==='string'?c.text:'';
         if(!text.trim())continue;
         const rowId=msg.id+':'+i;
+        // Keep both API fields unchanged. position is an API position marker,
+        // not a reliable indicator of dialogue, internal thought or truth by itself.
+        const speakerName=typeof c.speakerName==='string'?c.speakerName.slice(0,160):'';
+        const position=typeof c.position==='string'?c.position.slice(0,80):'';
         out.push({key:room+'|'+rowId,room,id:rowId,messageId:msg.id,contentIndex:i,
           time:msg.messageTime||null,role:kind==='info_box'?'info_box':isUser?'user':'character',
-          speaker:kind==='info_box'?'상태창':isUser?'사용자':(c.speakerName||'캐릭터'),kind,text});
+          speaker:kind==='info_box'?'상태창':isUser?'사용자':(speakerName||'캐릭터'),
+          speakerName,position,kind,text});
       }
     }
     return out;
@@ -584,7 +589,17 @@
     const room=data.room;
     if(!room||room!==activeRoom)return;
     const rows=normalize(data.messages,room);const changed=[];
-    for(const m of rows){if(!msgMap.has(m.key)||msgMap.get(m.key).text!==m.text){msgMap.set(m.key,m);changed.push(m);}}
+    for(const m of rows){
+      const old=msgMap.get(m.key);
+      // Old IndexedDB records may lack these fields. Enrich them without
+      // clearing previously observed metadata when an API response is sparse.
+      const merged=old?{...old,...m,
+        speakerName:m.speakerName||old.speakerName||'',
+        position:m.position||old.position||''}:m;
+      if(!old||['text','speaker','speakerName','position','kind','role'].some(k=>(old[k]||'')!==(merged[k]||''))){
+        msgMap.set(m.key,merged);changed.push(merged);
+      }
+    }
     if(!changed.length)return;
     try{await dbPutMessages(changed);}catch(e){setStatus('원문 저장 실패: '+String(e.message||e));return;}
     updateStatus();
@@ -973,7 +988,14 @@
       const evidenceQuote=ensureShort(issue?.evidenceQuote,350);
       const type=String(issue?.errorType||'').trim().toLowerCase();
       if(issue?.statementType!=='narration'||!factualTypes.has(type)||!quote||!reason||!evidenceQuote)continue;
-      const newest=sourceIds.filter(id=>idMap.get(id)?.role==='character'&&idMap.get(id)?.text.includes(quote));
+      // For known position metadata, only narrator-marked objective text may
+      // be proposed as an AI narration contradiction. Legacy rows with no
+      // position keep the existing behavior for backward compatibility.
+      const newest=sourceIds.filter(id=>{
+        const row=idMap.get(id);
+        return row?.role==='character'&&row.text.includes(quote)&&
+          (!row.position||row.position.toUpperCase()==='NARRATOR');
+      });
       if(!newest.length)continue;
       const latestIndex=Math.min(...newest.map(id=>messageOrder.get(id)??Number.MAX_SAFE_INTEGER));
       if(latestIndex===Number.MAX_SAFE_INTEGER)continue;
@@ -1051,9 +1073,17 @@
       type,name:profile.name,description:profile.description.slice(0,perProfile)
     })));
   }
+  const SPEAKER_CONTEXT_RULES='\n\n[화자·서술 위치 판독 규칙]\n'+
+    '각 원문의 speakerName과 position은 제타 API에서 얻은 메타데이터다. speaker는 기존 화면 표시용 이름이다. '+
+    'position=NARRATOR는 나레이터 위치 표시로 참고하고, LEFT 같은 값은 발화 위치 표식일 수 있으나 그것만으로 대사·속마음·객관적 사실을 확정하지 않는다. '+
+    '화자가 실제로 말한 대사, 서술자가 묘사한 장면, 인물의 생각·추측·거짓말을 본문 표현과 문맥으로 구별한다. '+
+    '인물의 주장이나 속마음을 객관적 확정 사실로 기록하지 않고, 알 수 없는 다른 인물의 지식으로 전가하지 않는다. '+
+    'speakerName/position이 없는 옛 원문은 기존 speaker/role과 실제 문장을 근거로 읽는다. '+
+    '한 메시지 안에 여러 contents가 있을 수 있으므로 각 행의 화자와 위치를 구별하되 sourceIds는 기존 원문 행 ID만 사용한다.';
   function analysisPrompt(rows){
-    const payload=rows.map((m,i)=>({id:m.id,order:i,speaker:m.speaker,role:m.role,kind:m.kind,text:m.text.slice(0,18000)}));
-    return ANALYSIS_GUIDANCE+PROFILE_REFERENCE_RULES+'\n\nJSON 예시 형식: '+ANALYSIS_OUTPUT_SCHEMA+
+    const payload=rows.map((m,i)=>({id:m.id,order:i,speaker:m.speaker,role:m.role,kind:m.kind,
+      speakerName:m.speakerName||'',position:m.position||'',text:m.text.slice(0,18000)}));
+    return ANALYSIS_GUIDANCE+PROFILE_REFERENCE_RULES+SPEAKER_CONTEXT_RULES+'\n\nJSON 예시 형식: '+ANALYSIS_OUTPUT_SCHEMA+
       '\n\n[직전 진행 중인 에피소드 — 이번 묶음이 계속되는지 최우선 확인]\n'+recentEpisodeContext()+
       '\n\n[기존 누적 기억 — 맥락 참고용, 과거 사건을 중복 생성하지 말 것]\n'+memoryContext()+
       '\n\n[현재 저장된 등장인물·유저 프로필 — 배경 참고 전용, 사건 증거 아님]\n'+analysisProfileReference()+
