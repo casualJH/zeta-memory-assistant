@@ -1440,6 +1440,7 @@
         <div><strong>${m.issues.filter(i=>i.status==='open').length}</strong><span>모순 의심</span></div>
       </div>
       <div class="zmm-info">Guardian 원문 변경 확인: ${safeArray(roomData.reviewQueue).filter(x=>x.status==='needs-review').length}개 원문 · 재검토 기억 ${['timeline','characters','relations','clues','facts','issues','knowledge','emotions'].reduce((n,k)=>n+safeArray(m[k]).filter(x=>x.reviewStatus==='needs-review').length,0)+(m.currentState?.reviewStatus==='needs-review'?1:0)}건. 기존 기억은 삭제하지 않으며 자동 재분석하지 않습니다.</div>
+      <div class="zmm-row"><button data-act="tab" data-tab="review">변경 원문 연결 기억 검토</button></div>
       <div class="zmm-row"><button class="zmm-main" data-act="full">과거 대화 전체 불러오기</button><button data-act="latest">최신 대화 확인</button></div>
       <div class="zmm-row"><button class="zmm-main" data-act="analyze">${analysisBusy?'분석 중…':'미분석 대화 요약'}</button><button data-act="stop">중지</button></div>
       <p class="zmm-muted">최초 1회 전체 수집이 완료되어야 분석할 수 있습니다. 자동 분석은 미분석 대화가 10개 이상 쌓이면 실행되며, 수동 요약은 개수에 관계없이 실행할 수 있습니다. API 키가 없으면 자동 분석하지 않습니다.</p>
@@ -1854,6 +1855,42 @@
       <div class="zmm-row"><button class="zmm-main" data-act="save-edit">저장</button><button data-act="cancel-edit">취소</button></div>
       <p class="zmm-muted">수동 수정한 값은 이후 AI 분석에서 자동 덮어쓰지 않게 표시됩니다.</p></div>`;
   }
+  function reviewMarkup(){
+    if(!roomData)return '<div class="zmm-empty">채팅방을 열어 주세요.</div>';
+    const all=reviewItems();
+    const pending=all.filter(({item})=>item.reviewStatus==='needs-review');
+    const invalid=all.filter(({item})=>item.reviewStatus==='invalid');
+    const renderItem=({kind,item})=>{
+      const proposal=reviewProposalValid(item)?item.reviewProposal:null;
+      const sourceRows=reviewEvidence(item);
+      const validSources=sourceRows.filter(x=>!x.missing);
+      const badge=item.reviewStatus==='invalid'?'무효 · 보관 중':item.manual?'수동 기억 · 근거 재검토':'재검토 필요 · AI 검색/상기 제외';
+      const verdictLabel={supported:'현재 원문에 근거 있음 (AI 제안)',unsupported:'기존 기억과 근거 불일치 (AI 제안)',uncertain:'판정 불가 (AI 제안)'};
+      return '<article class="zmm-item zmm-review-item">'+
+        '<h4>'+esc(REVIEW_LABELS[kind]||kind)+' · '+esc(badge)+'</h4>'+
+        '<pre>'+esc(reviewText(item,kind))+'</pre>'+
+        '<p class="zmm-muted">출처 '+sourceRows.length+'개 · 현재 조회 가능 '+validSources.length+'개'+
+        (item.manual?' · 직접 수정한 기억은 자동으로 바꾸지 않습니다.':'')+'</p>'+
+        sourceButtons(item.sourceIds)+
+        (proposal?'<div class="zmm-info"><strong>'+esc(verdictLabel[proposal.verdict])+'</strong>'+
+          '<p>'+esc(proposal.reason||'판단 이유 없음')+'</p>'+
+          (proposal.supportingQuote?'<p>현재 원문 인용: "'+esc(proposal.supportingQuote)+'"</p>':'')+'</div>':'')+
+        (item.reviewStatus==='needs-review'?
+          '<div class="zmm-row"><button data-act="review-ai" data-kind="'+esc(kind)+'" data-id="'+esc(item.id)+'">Gemini 검토 제안</button>'+
+          '<button data-act="review-valid" data-kind="'+esc(kind)+'" data-id="'+esc(item.id)+'" '+(validSources.length?'':'disabled')+'>근거 확인 후 유지</button>'+
+          '<button data-act="review-invalid" data-kind="'+esc(kind)+'" data-id="'+esc(item.id)+'">무효로 표시</button></div>':
+          '<p class="zmm-muted">무효로 확정한 기록은 삭제되지 않으며, 현재 Gemini 기억 검색·서사 상기에서 제외됩니다.</p>')+
+        '</article>';
+    };
+    return cardHeading('Guardian 원문 변경 재검토','원문 변경에 영향받은 기억을 분리 보관합니다. 실제 원문을 확인한 후 유지하거나 무효로 표시하세요.')+
+      '<div class="zmm-info">재검토 대기 '+pending.length+'건 · 무효 보관 '+invalid.length+'건 · 원문 변경 목록 '+
+      safeArray(roomData.reviewQueue).length+'건</div>'+
+      '<p class="zmm-muted">Gemini 검토는 선택한 기억 1건에만 API 요청합니다. AI 판단은 제안일 뿐이며 자동 삭제·자동 수정하지 않습니다. 비용 또는 무료 사용량이 발생할 수 있습니다.</p>'+
+      (pending.slice(0,40).map(renderItem).join('')||'<div class="zmm-empty">현재 재검토할 기억이 없습니다.</div>')+
+      (pending.length>40?'<p class="zmm-muted">성능 보호를 위해 한 번에 최대 40건 표시합니다. 처리 후 나머지 기록이 나타납니다.</p>':'')+
+      (invalid.length?'<details><summary>무효 처리하여 보관한 기억 ('+invalid.length+'건)</summary>'+
+        invalid.slice(-20).map(renderItem).join('')+'</details>':'');
+  }
   function sourceMarkup(){
     const ids=[...new Set((Array.isArray(ui.previewSource)?ui.previewSource:[ui.previewSource])
       .filter(id=>typeof id==='string'&&id))];
@@ -1878,12 +1915,12 @@
   function render(){
     if(!content)return;
     if(!roomData&&tab!=='settings')tab='home';
-    const titles={home:'현황',timeline:'타임라인',people:'인물·관계',knowledge:'설정·복선',conflicts:'모순',search:'기억 검색',remind:'서사 상기'};
+    const titles={home:'현황',timeline:'타임라인',people:'인물·관계',knowledge:'설정·복선',conflicts:'모순',review:'재검토',search:'기억 검색',remind:'서사 상기'};
     const tabs=$('#zmm-tabs');
     if(tabs)tabs.innerHTML=Object.entries(titles).map(([id,title])=>`<button type="button" data-act="tab" data-tab="${id}" class="${tab===id?'active':''}">${title}</button>`).join('');
     const settingsButton=$('#zmm-settings-button',panel);
     if(settingsButton)settingsButton.classList.toggle('active',tab==='settings');
-    const html=({home:homeMarkup,timeline:timelineMarkup,people:peoplePageMarkup,knowledge:knowledgeMarkup,conflicts:issuesMarkup,
+    const html=({home:homeMarkup,timeline:timelineMarkup,people:peoplePageMarkup,knowledge:knowledgeMarkup,conflicts:issuesMarkup,review:reviewMarkup,
       search:searchMarkup,remind:reminderMarkup,settings:settingsMarkup})[tab]();
     // Source view replaces the list. Previously it was appended after a long list and invisible on mobile Safari.
     content.innerHTML=ui.previewSource?sourceMarkup():(ui.edit?editingMarkup():html);
@@ -2086,6 +2123,8 @@
     if(act==='close'){panel.hidden=true;return;}
     if(act==='people-subtab'){ui.peopleSubtab=button.dataset.subtab==='profiles'?'profiles':'memory';ui.edit=null;ui.previewSource=null;render();content.scrollTop=0;return;}
     if(act==='load-chat-profiles'){await loadChatProfiles();return;}
+    if(act==='review-ai'){await proposeMemoryReview(kind,id);return;}
+    if(act==='review-valid'||act==='review-invalid'){await decideMemoryReview(kind,id,act==='review-valid'?'valid':'invalid');return;}
     if(act==='timeline-selection-toggle'){ui.timelineSelectionMode=!ui.timelineSelectionMode;ui.timelineSelection=[];render();return;}
     if(act==='timeline-select-clear'){ui.timelineSelection=[];render();return;}
     if(act==='timeline-select-all'){
