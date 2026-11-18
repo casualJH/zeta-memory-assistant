@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         제타 기억력 보조
 // @namespace    zeta-memory-assistant
-// @version      0.4.0
+// @version      0.4.1
 // @description  과거 대화 로컬 보관, Gemini 서사 기억, 모순 의심 표시, 정정·상기 복사, 기억 검색
 // @updateURL    https://raw.githubusercontent.com/casualJH/zeta-memory-assistant/main/zeta-memory-assistant.user.js
 // @downloadURL  https://raw.githubusercontent.com/casualJH/zeta-memory-assistant/main/zeta-memory-assistant.user.js
@@ -63,7 +63,7 @@
   if(window.top!==window)return;
   if (window.__zetaMemoryAssistantV1) return;
   window.__zetaMemoryAssistantV1 = true;
-  const VERSION = '0.4.0';
+  const VERSION = '0.4.1';
   const DB_NAME = 'zeta-memory-assistant-db-v1';
   const UUID = /^[0-9a-f]{8}-(?:[0-9a-f]{4}-){3}[0-9a-f]{12}$/i;
   const CHANNEL = 'zmm-' + Array.from(crypto.getRandomValues(new Uint8Array(12)), n => n.toString(16).padStart(2, '0')).join('');
@@ -215,6 +215,7 @@
       item.reviewStatus='needs-review';
       item.reviewReason='참조 원문이 변경되어 기존 분석의 재검증이 필요합니다.';
       item.reviewedAt=null;
+      item.reviewProposal=null;
       item.sourceChangedAt=at;
       // Even manually edited memory is only flagged; never rewrite its content.
     };
@@ -232,7 +233,7 @@
     mem.updatedAt=at;
     return affected;
   }
-  function hasStaleEvidence(item){return item?.reviewStatus==='needs-review'&&!item.manual;}
+  function hasStaleEvidence(item){return item?.['needs-review','invalid'].includes(item?.reviewStatus)&&(!item.manual||item.reviewStatus==='invalid');}
   async function saveRoom(){if(!roomData)return;roomData.updatedAt=Date.now();await dbPut('rooms',roomData);}
   function orderedMessages(){return [...msgMap.values()].sort((a,b)=>{
     const ta=Date.parse(a.time)||0,tb=Date.parse(b.time)||0;
@@ -732,6 +733,7 @@
       setStatus('원문 변경 '+textChanged.length+'건 감지 · 관련 기억 '+affected+'건 재검토 대기 (자동 덮어쓰기 없음)');
     }
     updateStatus();
+    if(textChanged.length&&panel&&!panel.hidden)render();
     if(!textChanged.length&&(data.source==='live'||data.source==='latest')){
       if(roomData?.fullyLoaded&&apiSettings.auto&&getApiKey())scheduleAnalysis(2800);
     }
@@ -957,7 +959,7 @@
       if(!text)continue;
       const original=sourceIds.map(id=>findSource(id)?.text||'').join('\n');
       if(!quotesVerified(text,original))continue;
-      const dedupe=target.find(x=>x.text===text||x.description===text||x.detail===text||x.title===text);
+      const dedupe=target.find(x=>!hasStaleEvidence(x)&&(x.text===text||x.description===text||x.detail===text||x.title===text));
       if(dedupe){
         dedupe.sourceIds=[...new Set([...(dedupe.sourceIds||[]),...sourceIds])].slice(0,20);
         if(kind==='clues'&&!dedupe.manual&&['open','solved','hold'].includes(raw.status))dedupe.status=raw.status;
@@ -1072,7 +1074,7 @@
     changed+=mergeItems(mem.knowledge,delta.knowledge,allowed,'knowledge');
     for(const c of safeArray(delta.characters).slice(0,40)){
       const name=ensureShort(c.name,100),sources=sanitizeSources(c.sourceIds,allowed);if(!name||!sources.length)continue;
-      const old=mem.characters.find(x=>x.name===name);
+      const old=mem.characters.find(x=>x.name===name&&!hasStaleEvidence(x));
       if(old){
         if(!old.manual){old.traits=normalizedInfo(c.traits||old.traits,1200);old.secrets=normalizedInfo(c.secrets||old.secrets,900);old.family=normalizedInfo(c.family||old.family,900);}
         old.sourceIds=[...new Set([...old.sourceIds,...sources])].slice(-25);
@@ -1081,7 +1083,7 @@
     for(const r of safeArray(delta.relations).slice(0,40)){
       const a=ensureShort(r.a,90),b=ensureShort(r.b,90),sources=sanitizeSources(r.sourceIds,allowed);
       if(!a||!b||!sources.length||a===b)continue;
-      let existing=mem.relations.find(x=>(x.a===a&&x.b===b)||(x.a===b&&x.b===a));
+      let existing=mem.relations.find(x=>!hasStaleEvidence(x)&&((x.a===a&&x.b===b)||(x.a===b&&x.b===a)));
       const status=normalizedInfo(r.status,1400);
       if(existing){if(!existing.manual&&status)existing.status=status;existing.history.push({status,sourceIds:sources});existing.history=existing.history.slice(-30);existing.sourceIds=[...new Set([...existing.sourceIds,...sources])].slice(-25);}
       else{existing={id:newId('relation'),a,b,status,history:[{status,sourceIds:sources}],sourceIds:sources,manual:false};mem.relations.push(existing);changed++;}
@@ -1091,7 +1093,7 @@
       const sources=sanitizeSources(raw?.sourceIds,allowed);
       const feeling=normalizedInfo(raw?.feeling,350),reason=normalizedInfo(raw?.reason,900),behavior=normalizedInfo(raw?.behavior,900);
       if(!person||!target||!feeling||!sources.length)continue;
-      const existing=mem.emotions.find(x=>x.person===person&&x.target===target);
+      const existing=mem.emotions.find(x=>!hasStaleEvidence(x)&&x.person===person&&x.target===target);
       if(existing){if(!existing.manual){existing.feeling=feeling;existing.reason=reason;existing.behavior=behavior;existing.certainty=raw.certainty==='inferred'?'inferred':'explicit';}
         existing.sourceIds=[...new Set([...safeArray(existing.sourceIds),...sources])].slice(-25);}
       else{mem.emotions.push({id:newId('emotion'),person,target,feeling,reason,behavior,
@@ -1101,7 +1103,7 @@
       const state=delta.currentState,sources=sanitizeSources(state.sourceIds,allowed);
       const summary=normalizedInfo(state.summary,2400);
       if(summary&&sources.length&&quotesVerified(summary,sources.map(id=>idMap.get(id)?.text||'').join('\n'))){
-        if(!mem.currentState?.manual){mem.currentState={id:mem.currentState?.id||newId('state'),summary,
+        if(!mem.currentState?.manual&&!hasStaleEvidence(mem.currentState)){mem.currentState={id:mem.currentState?.id||newId('state'),summary,
           location:normalizedInfo(state.location,350),people:normalizedInfo(state.people,500),
           conflict:normalizedInfo(state.conflict,700),sourceIds:sources,manual:false};changed++;}
       }
@@ -1142,7 +1144,7 @@
     // without this map remain readable; manual memories are never overwritten.
     const observedRevisions=new Map(chunkRows.map(row=>[row.id,Math.max(1,Number(row.revision)||1)]));
     const captureRevisions=item=>{
-      if(!item||item.manual)return;
+      if(!item||item.manual||hasStaleEvidence(item))return;
       const linked=safeArray(item.sourceIds).filter(id=>observedRevisions.has(id));
       if(!linked.length)return;
       item.sourceVersions={...(item.sourceVersions||{})};
