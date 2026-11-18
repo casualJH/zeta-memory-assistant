@@ -116,13 +116,18 @@
   function openDB() {
     if(dbPromise)return dbPromise;
     dbPromise=new Promise((resolve,reject)=>{
-      const request=indexedDB.open(DB_NAME,1);
+      const request=indexedDB.open(DB_NAME,2);
       request.onupgradeneeded=()=>{
         const db=request.result;
         if(!db.objectStoreNames.contains('rooms'))db.createObjectStore('rooms',{keyPath:'room'});
         if(!db.objectStoreNames.contains('messages')){
           const store=db.createObjectStore('messages',{keyPath:'key'});
           store.createIndex('room','room',{unique:false});
+        }
+        if(!db.objectStoreNames.contains('messageVersions')){
+          const store=db.createObjectStore('messageVersions',{keyPath:'key'});
+          store.createIndex('room','room',{unique:false});
+          store.createIndex('sourceKey','sourceKey',{unique:false});
         }
       };
       request.onsuccess=()=>resolve(request.result);
@@ -157,6 +162,74 @@
       req.onsuccess=()=>resolve(req.result||[]);req.onerror=()=>reject(req.error);
     });
   }
+
+  // Guardian-style non-destructive version history. Both records are written
+  // in one IndexedDB transaction so current message and history cannot diverge.
+  function contentSignature(row){
+    return JSON.stringify([row?.text||'',row?.kind||'',row?.speaker||'',
+      row?.speakerName||'',row?.position||'',row?.role||'']);
+  }
+  function primaryTextChanged(old,next){
+    return old?.text!==next?.text||old?.kind!==next?.kind||
+      old?.speaker!==next?.speaker||old?.role!==next?.role;
+  }
+  function versionRecord(row,revision,reason,at){
+    return {key:row.key+'|v'+revision,sourceKey:row.key,room:row.room,
+      messageId:row.messageId,contentIndex:row.contentIndex,revision,
+      recordedAt:at,reason,signature:contentSignature(row),
+      speaker:row.speaker||'',speakerName:row.speakerName||'',position:row.position||'',
+      kind:row.kind||'',role:row.role||'',text:row.text||''};
+  }
+  async function dbCommitMessageBatch(rows,versions){
+    if(!rows.length&&!versions.length)return;
+    const db=await openDB();
+    return new Promise((resolve,reject)=>{
+      const tx=db.transaction(['messages','messageVersions'],'readwrite');
+      const current=tx.objectStore('messages'),history=tx.objectStore('messageVersions');
+      rows.forEach(r=>current.put(r));
+      versions.forEach(r=>history.put(r));
+      tx.oncomplete=()=>resolve();
+      tx.onerror=()=>reject(tx.error||new Error('메시지 저장 실패'));
+      tx.onabort=()=>reject(tx.error||new Error('메시지 이력 저장 취소'));
+    });
+  }
+  async function dbSourceVersions(room,rowId){
+    const db=await openDB();
+    return new Promise((resolve,reject)=>{
+      const tx=db.transaction('messageVersions','readonly');
+      const request=tx.objectStore('messageVersions').index('sourceKey').getAll(IDBKeyRange.only(room+'|'+rowId));
+      request.onsuccess=()=>resolve((request.result||[]).sort((a,b)=>a.revision-b.revision));
+      request.onerror=()=>reject(request.error||new Error('이력 조회 실패'));
+    });
+  }
+  function markChangedEvidence(changedIds,at){
+    if(!roomData||!changedIds.length)return 0;
+    const changed=new Set(changedIds);
+    const mem=roomData.memory;
+    let affected=0;
+    const touch=item=>{
+      if(!item||!safeArray(item.sourceIds).some(id=>changed.has(id)||changed.has(String(id).split(':')[0])))return;
+      if(item.reviewStatus!=='needs-review')affected++;
+      item.reviewStatus='needs-review';
+      item.reviewReason='참조 원문이 변경되어 기존 분석의 재검증이 필요합니다.';
+      item.reviewedAt=null;
+      item.sourceChangedAt=at;
+      // Even manually edited memory is only flagged; never rewrite its content.
+    };
+    for(const kind of ['timeline','facts','characters','relations','knowledge','clues','emotions','issues'])
+      safeArray(mem[kind]).forEach(touch);
+    touch(mem.currentState);
+    roomData.reviewQueue=safeArray(roomData.reviewQueue);
+    for(const id of changedIds){
+      const existing=roomData.reviewQueue.find(x=>x.sourceId===id);
+      if(existing){existing.changedAt=at;existing.status='needs-review';}
+      else roomData.reviewQueue.push({sourceId:id,changedAt:at,status:'needs-review'});
+    }
+    ui.reminderCache=null;
+    mem.updatedAt=at;
+    return affected;
+  }
+  function hasStaleEvidence(item){return item?.reviewStatus==='needs-review'&&!item.manual;}
   async function saveRoom(){if(!roomData)return;roomData.updatedAt=Date.now();await dbPut('rooms',roomData);}
   function orderedMessages(){return [...msgMap.values()].sort((a,b)=>{
     const ta=Date.parse(a.time)||0,tb=Date.parse(b.time)||0;
@@ -618,22 +691,43 @@
   async function acceptBatch(data){
     const room=data.room;
     if(!room||room!==activeRoom)return;
-    const rows=normalize(data.messages,room);const changed=[];
+    const epoch=syncEpoch,rows=normalize(data.messages,room);
+    const changed=[],versions=[],textChanged=[],now=Date.now();
     for(const m of rows){
       const old=msgMap.get(m.key);
-      // Old IndexedDB records may lack these fields. Enrich them without
-      // clearing previously observed metadata when an API response is sparse.
+      // Preserve existing API metadata on sparse responses.
       const merged=old?{...old,...m,
         speakerName:m.speakerName||old.speakerName||'',
         position:m.position||old.position||''}:m;
-      if(!old||['text','speaker','speakerName','position','kind','role'].some(k=>(old[k]||'')!==(merged[k]||''))){
-        msgMap.set(m.key,merged);changed.push(merged);
+      const contentChanged=!!old&&primaryTextChanged(old,merged);
+      const different=!old||contentSignature(old)!==contentSignature(merged);
+      if(!different)continue;
+      if(contentChanged){
+        const rev=Math.max(1,Number(old.revision)||1);
+        const nextRev=rev+1;
+        merged.revision=nextRev;
+        versions.push(versionRecord({...old,revision:rev},rev,'previous-observed',now));
+        versions.push(versionRecord(merged,nextRev,'내용 변경 · 원인 미확인',now));
+        // Source IDs remain messageId:contentIndex; no fabricated edit/regeneration reason.
+        textChanged.push(m.id);
+      }else{
+        merged.revision=Math.max(1,Number(old?.revision)||1);
+        if(!old)versions.push(versionRecord(merged,1,'first-observed',now));
       }
+      changed.push(merged);
     }
     if(!changed.length)return;
-    try{await dbPutMessages(changed);}catch(e){setStatus('원문 저장 실패: '+String(e.message||e));return;}
+    try{await dbCommitMessageBatch(changed,versions);}
+    catch(e){setStatus('메시지 원문·이력 저장 실패: '+String(e.message||e));return;}
+    if(room!==activeRoom||epoch!==syncEpoch)return;
+    for(const m of changed)msgMap.set(m.key,m);
+    if(textChanged.length&&roomData){
+      const affected=markChangedEvidence(textChanged,now);
+      try{await saveRoom();}catch(e){setStatus('재검토 상태 저장 실패: '+String(e.message||e));}
+      setStatus('원문 변경 '+textChanged.length+'건 감지 · 관련 기억 '+affected+'건 재검토 대기 (자동 덮어쓰기 없음)');
+    }
     updateStatus();
-    if(data.source==='live'||data.source==='latest'){
+    if(!textChanged.length&&(data.source==='live'||data.source==='latest')){
       if(roomData?.fullyLoaded&&apiSettings.auto&&getApiKey())scheduleAnalysis(2800);
     }
   }
