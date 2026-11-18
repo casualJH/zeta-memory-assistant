@@ -1466,7 +1466,7 @@
   }
   function fmtRows(arr,kind,textFn){
     if(!arr.length)return '<div class="zmm-empty">저장된 기록이 없습니다.</div>';
-    return arr.map(item=>`<article class="zmm-item"><div class="zmm-item-text">${hasStaleEvidence(item)?'<span class="zmm-pill">재검토 필요 · AI 상기/검색 제외</span>':''}${item.manual&&item.reviewStatus==='needs-review'?'<span class="zmm-pill">수동 기록 · 원문 변경 참고</span>':''}${textFn(item)}</div>${sourceButtons(item.sourceIds)}${editButtons(kind,item)}</article>`).join('');
+    return arr.map(item=>`<article class="zmm-item"><div class="zmm-item-text">${classificationBadges(item)} ${hasStaleEvidence(item)?'<span class="zmm-pill">재검토 필요 · AI 상기/검색 제외</span>':''}${item.manual&&item.reviewStatus==='needs-review'?'<span class="zmm-pill">수동 기록 · 원문 변경 참고</span>':''}${textFn(item)}</div>${sourceButtons(item.sourceIds)}${editButtons(kind,item)}</article>`).join('');
   }
   function memoryArr(kind){return kind==='timeline'?roomData?.memory.timeline:
     kind==='characters'?roomData?.memory.characters:kind==='relations'?roomData?.memory.relations:
@@ -1509,11 +1509,12 @@
     const blocks=[...grouping].map(([label,items])=>`<section class="zmm-day"><h3>${esc(label)}</h3>${items.map(x=>`
       <article class="zmm-item" data-timeline-item="${esc(x.id)}">
         ${selecting?`<label class="zmm-timeline-select"><input type="checkbox" data-field="timeline-select" data-id="${esc(x.id)}" ${chosen.has(x.id)?'checked':''}><span>이 사건 선택</span></label>`:''}
-        <div class="zmm-item-text">${x.reviewStatus==='needs-review'?'<span class="zmm-pill">원문 변경 · 재검토 필요</span>':''}${x.timeType==='past'?'<span class="zmm-pill">과거 사건</span>':''}${x.title?`<strong class="zmm-episode-title">${esc(x.title)}</strong>`:''}<p>${esc(x.description)}</p></div>
+        <div class="zmm-item-text">${classificationBadges(x)} ${x.reviewStatus==='needs-review'?'<span class="zmm-pill">원문 변경 · 재검토 필요</span>':''}${x.timeType==='past'?'<span class="zmm-pill">과거 사건</span>':''}${x.title?`<strong class="zmm-episode-title">${esc(x.title)}</strong>`:''}<p>${esc(x.description)}</p></div>
         ${sourceButtons(x.sourceIds)}${editButtons('timeline',x)}
       </article>`).join('')}</section>`);
     const state=roomData?.memory?.currentState;
     const snapshot=state?.summary?`<section class="zmm-item"><h4>현재 장면</h4>
+      ${classificationBadges(state)}
       ${state.location?`<p>장소: ${esc(state.location)}</p>`:''}
       ${state.people?`<p>인물: ${esc(state.people)}</p>`:''}
       <p>${esc(state.summary)}</p>${state.conflict?`<p>진행 중인 갈등: ${esc(state.conflict)}</p>`:''}
@@ -1899,6 +1900,8 @@
       issues:[['quote','문제 지문'],['reason','근거 설명'],['correction','정정 지침']]};
     return `<div class="zmm-editor"><h3>${esc(kinds[ui.edit.kind])} 편집</h3>
       ${safeArray(fields[ui.edit.kind]).map(([k,label])=>`<label>${esc(label)}<textarea data-edit-field="${k}" rows="${k==='description'||k==='text'||k==='traits'?4:2}">${esc(item[k]||'')}</textarea></label>`).join('')}
+      <label>기억 유형<select data-class-field="memoryClass">${MEMORY_CLASS_VALUES.map(k=>`<option value="${k}" ${normalizedMemoryClass(item.memoryClass)===k?'selected':''}>${MEMORY_CLASS_LABELS[k]}</option>`).join('')}</select></label>
+      <label>근거 성격<select data-class-field="evidenceClass">${EVIDENCE_CLASS_VALUES.map(k=>`<option value="${k}" ${normalizedEvidenceClass(item.evidenceClass)===k?'selected':''}>${EVIDENCE_CLASS_LABELS[k]}</option>`).join('')}</select></label>
       <div class="zmm-row"><button class="zmm-main" data-act="save-edit">저장</button><button data-act="cancel-edit">취소</button></div>
       <p class="zmm-muted">수동 수정한 값은 이후 AI 분석에서 자동 덮어쓰지 않게 표시됩니다.</p></div>`;
   }
@@ -1915,7 +1918,7 @@
       const badge=item.reviewStatus==='invalid'?'무효 · 보관 중':item.manual?'수동 기억 · 근거 재검토':'재검토 필요 · AI 검색/상기 제외';
       const verdictLabel={supported:'현재 원문에 근거 있음 (AI 제안)',unsupported:'기존 기억과 근거 불일치 (AI 제안)',uncertain:'판정 불가 (AI 제안)'};
       return '<article class="zmm-item zmm-review-item">'+
-        '<h4>'+esc(REVIEW_LABELS[kind]||kind)+' · '+esc(badge)+'</h4>'+
+        '<h4>'+esc(REVIEW_LABELS[kind]||kind)+' · '+esc(badge)+'</h4>'+classificationBadges(item)+
         '<pre>'+esc(reviewText(item,kind))+'</pre>'+
         '<p class="zmm-muted">출처 '+sourceRows.length+'개 · 현재 조회 가능 '+validSources.length+'개'+
         (item.manual?' · 직접 수정한 기억은 자동으로 바꾸지 않습니다.':'')+'</p>'+
@@ -2159,6 +2162,10 @@
     for(const el of panel.querySelectorAll('[data-edit-field]')){
       const k=el.dataset.editField;if(!Object.prototype.hasOwnProperty.call(item,k))continue;
       item[k]=ensureShort(el.value,k==='description'||k==='text'?1800:900);
+    }
+    for(const select of panel.querySelectorAll('[data-class-field]')){
+      if(select.dataset.classField==='memoryClass')item.memoryClass=normalizedMemoryClass(select.value);
+      if(select.dataset.classField==='evidenceClass')item.evidenceClass=normalizedEvidenceClass(select.value);
     }
     item.manual=true;
     if(ui.edit.kind==='clues'&&!['open','solved','hold'].includes(item.status))item.status='hold';
