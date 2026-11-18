@@ -233,6 +233,126 @@
     mem.updatedAt=at;
     return affected;
   }
+  const REVIEW_KINDS=['timeline','characters','relations','facts','knowledge','clues','emotions','issues','currentState'];
+  const REVIEW_LABELS={timeline:'서사 사건',characters:'인물 설정',relations:'관계',facts:'확정 설정',
+    knowledge:'인물 지식',clues:'복선',emotions:'감정',issues:'모순',currentState:'현재 장면'};
+  function reviewItems(){
+    const mem=roomData?.memory;
+    if(!mem)return [];
+    const items=[];
+    for(const kind of REVIEW_KINDS){
+      const list=kind==='currentState'?[mem.currentState]:safeArray(mem[kind]);
+      for(const item of list)if(item?.reviewStatus==='needs-review'||item?.reviewStatus==='invalid')
+        items.push({kind,item});
+    }
+    return items;
+  }
+  function reviewItem(kind,id){
+    if(kind==='currentState')return roomData?.memory.currentState?.id===id?roomData.memory.currentState:null;
+    return safeArray(roomData?.memory?.[kind]).find(x=>x.id===id)||null;
+  }
+  function reviewText(item,kind){
+    const text=kind==='currentState'?item.summary:kind==='timeline'?item.description:
+      kind==='characters'?[item.name,item.traits,item.family,item.secrets].filter(Boolean).join(' / '):
+      kind==='relations'?item.a+' ↔ '+item.b+': '+item.status:
+      kind==='emotions'?item.person+' → '+item.target+': '+item.feeling+' / '+item.reason:
+      kind==='issues'?item.quote+' / '+item.reason:
+      kind==='clues'?item.title+' / '+item.detail:
+      kind==='knowledge'?item.character+': '+item.text:
+      item.text||item.description||'';
+    return String(text||'').slice(0,2600);
+  }
+  function reviewEvidence(item){
+    return safeArray(item?.sourceIds).slice(0,20).map(id=>{
+      const row=findSource(id);
+      return row?{id,revision:Math.max(1,Number(row.revision)||1),
+        speakerName:row.speakerName||row.speaker||'',position:row.position||'',
+        role:row.role||'',text:String(row.text||'').slice(0,10000)}:
+        {id,missing:true};
+    });
+  }
+  function reviewFingerprint(item){
+    return JSON.stringify(reviewEvidence(item).map(x=>[x.id,x.revision||0,x.text||'',!!x.missing]));
+  }
+  function reviewProposalValid(item){
+    return item?.reviewProposal&&item.reviewProposal.fingerprint===reviewFingerprint(item);
+  }
+  function pruneReviewQueue(){
+    if(!roomData)return;
+    const pending=new Set(reviewItems().filter(x=>x.item.reviewStatus==='needs-review')
+      .flatMap(({item})=>safeArray(item.sourceIds)));
+    for(const entry of safeArray(roomData.reviewQueue)){
+      if(entry.status==='needs-review'&&!pending.has(entry.sourceId))entry.status='reviewed';
+    }
+  }
+  async function proposeMemoryReview(kind,id){
+    const item=reviewItem(kind,id);
+    if(!item||item.reviewStatus!=='needs-review')return setStatus('재검토할 기억이 없습니다.');
+    if(!getApiKey())return setStatus('Gemini 제안에는 API 키가 필요합니다. 직접 근거를 확인하고 처리할 수도 있습니다.');
+    if(analysisBusy||syncBusy)return setStatus('대화 수집·분석 종료 후 재검토해 주세요.');
+    const room=activeRoom,epoch=syncEpoch,modelText=reviewText(item,kind);
+    const evidence=reviewEvidence(item),fingerprint=reviewFingerprint(item);
+    const history=[];
+    for(const row of evidence.filter(x=>!x.missing).slice(0,8)){
+      const versions=await dbSourceVersions(room,row.id);
+      const previous=versions.filter(v=>v.revision<row.revision).slice(-2)
+        .map(v=>({revision:v.revision,text:String(v.text||'').slice(0,4500)}));
+      if(previous.length)history.push({sourceId:row.id,previous});
+    }
+    if(room!==activeRoom||epoch!==syncEpoch)return;
+    const prompt='역할: 기억 근거 검증 보조. 새 사건이나 대사를 창작하지 말 것. 아래 이전 기억이 현재 원문에 의해 뒷받침되는지 판단하라. '+
+      '과거 원문은 왜 재검토하는지 설명할 참고용이고 현재 유효한 근거가 아니다. 인물의 주장·거짓말·추론과 객관적 사실을 구분하라. '+
+      '수정된 부분 외의 유효한 근거가 있다면 그것도 고려하라. 근거가 부족하면 uncertain. '+
+      'JSON 객체 하나로만 응답: {"verdict":"supported|unsupported|uncertain","reason":"판단 근거","supportingSourceIds":["현재 원문 ID"],"supportingQuote":"현재 원문에서 그대로 인용한 짧은 연속 문자열"}. '+
+      'supported라면 반드시 현재 원문에서 인용 가능한 supportingQuote와 해당 supportingSourceIds를 제공하라. '+
+      '[기억 종류]\n'+kind+'\n[기존 기억]\n'+modelText+
+      '\n[현재 유효 원문]\n'+JSON.stringify(evidence)+
+      '\n[참고용 이전 버전]\n'+JSON.stringify(history);
+    setStatus('Gemini가 변경된 원문에 연결된 기억을 검토 중…');
+    try{
+      const result=await askGemini(prompt,1800,room);
+      if(room!==activeRoom||epoch!==syncEpoch||reviewItem(kind,id)!==item||
+        item.reviewStatus!=='needs-review'||fingerprint!==reviewFingerprint(item))
+        return setStatus('분석 중 원문이나 채팅방이 변경되어 검토 결과를 폐기했습니다.');
+      let verdict=['supported','unsupported','uncertain'].includes(result.verdict)?result.verdict:'uncertain';
+      const ids=safeArray(result.supportingSourceIds).filter(x=>typeof x==='string'&&evidence.some(e=>e.id===x&&!e.missing));
+      const quote=String(result.supportingQuote||'').slice(0,450);
+      const quoteValid=!!quote&&ids.some(sourceId=>String(evidence.find(e=>e.id===sourceId)?.text||'').includes(quote));
+      if(verdict==='supported'&&(!ids.length||!quoteValid))verdict='uncertain';
+      item.reviewProposal={verdict,reason:String(result.reason||'').slice(0,1400),
+        supportingSourceIds:ids,supportingQuote:quoteValid?quote:'',fingerprint,at:Date.now()};
+      await saveRoom();render();setStatus('AI 재검토 제안 준비 완료 · 최종 판단은 사용자가 결정합니다.');
+    }catch(e){setStatus('재검토 제안 실패: '+String(e.message||e));}
+  }
+  async function decideMemoryReview(kind,id,choice){
+    const item=reviewItem(kind,id);
+    if(!item||item.reviewStatus!=='needs-review')return setStatus('재검토 대기 항목이 아닙니다.');
+    if(analysisBusy||syncBusy)return setStatus('대화 수집 또는 분석 종료 후 진행해 주세요.');
+    if(choice==='valid'&&(!reviewProposalValid(item)||item.reviewProposal.verdict!=='supported'))
+      return setStatus('현재 근거를 뒷받침하는 AI 검토 제안을 먼저 받아야 유효 확정할 수 있습니다.');
+    const notice=choice==='valid'?'현재 원문이 해당 기억을 뒷받침한다고 확정할까요? 원문이 다시 바뀌면 재검토됩니다.':
+      '해당 기억을 무효 처리할까요? 내용은 삭제하지 않지만 AI 상기·검색에서는 제외됩니다.';
+    if(!confirm(notice))return;
+    const previous=JSON.parse(JSON.stringify(item));
+    item.reviewStatus=choice==='valid'?'valid':'invalid';
+    item.reviewedAt=Date.now();
+    item.reviewReason=choice==='valid'?'사용자 확인: 현재 원문 근거로 유효 판정':'사용자 확인: 기존 기억 무효';
+    if(choice==='valid'){
+      item.sourceVersions={...(item.sourceVersions||{})};
+      for(const row of reviewEvidence(item))if(!row.missing)item.sourceVersions[row.id]=row.revision;
+    }
+    item.reviewHistory=safeArray(item.reviewHistory).slice(-19);
+    item.reviewHistory.push({at:item.reviewedAt,status:item.reviewStatus,reason:item.reviewReason});
+    item.reviewProposal=null;
+    pruneReviewQueue();
+    try{
+      await saveRoom();ui.reminderCache=null;ui.lastOutput='';ui.searchAnswer='';ui.searchResults=[];
+      render();setStatus(choice==='valid'?'근거 검토 완료 · 기억 유효 처리':'기존 기억 보존 · 무효 상태로 분리');
+    }catch(e){
+      Object.keys(item).forEach(key=>delete item[key]);Object.assign(item,previous);
+      setStatus('재검토 결과 저장 실패: '+String(e.message||e));
+    }
+  }
   function hasStaleEvidence(item){return item?.['needs-review','invalid'].includes(item?.reviewStatus)&&(!item.manual||item.reviewStatus==='invalid');}
   async function saveRoom(){if(!roomData)return;roomData.updatedAt=Date.now();await dbPut('rooms',roomData);}
   function orderedMessages(){return [...msgMap.values()].sort((a,b)=>{
