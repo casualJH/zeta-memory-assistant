@@ -722,6 +722,8 @@
     if(room!==activeRoom||epoch!==syncEpoch)return;
     for(const m of changed)msgMap.set(m.key,m);
     if(textChanged.length&&roomData){
+      // Never merge an in-flight AI result against a changed source revision.
+      analysisStop=true;
       const affected=markChangedEvidence(textChanged,now);
       try{await saveRoom();}catch(e){setStatus('재검토 상태 저장 실패: '+String(e.message||e));}
       setStatus('원문 변경 '+textChanged.length+'건 감지 · 관련 기억 '+affected+'건 재검토 대기 (자동 덮어쓰기 없음)');
@@ -1138,10 +1140,13 @@
   }
   function memoryContext(){
     const m=roomData.memory;
-    const arr={fixed:m.facts.filter(x=>x.importance==='critical'||x.importance==='high'||x.manual).slice(-90),
-      people:m.characters.slice(-40),relations:m.relations.slice(-50),clues:m.clues.filter(x=>x.status!=='solved').slice(-45),
-      knowledge:m.knowledge.slice(-55),emotions:m.emotions.slice(-50),currentState:m.currentState,
-      events:orderedTimeline().slice(-65),lastIssues:m.issues.filter(x=>x.status!=='dismissed').slice(-18),
+    const valid=list=>safeArray(list).filter(x=>!hasStaleEvidence(x));
+    const arr={fixed:valid(m.facts).filter(x=>x.importance==='critical'||x.importance==='high'||x.manual).slice(-90),
+      people:valid(m.characters).slice(-40),relations:valid(m.relations).slice(-50),clues:valid(m.clues).filter(x=>x.status!=='solved').slice(-45),
+      knowledge:valid(m.knowledge).slice(-55),emotions:valid(m.emotions).slice(-50),
+      currentState:hasStaleEvidence(m.currentState)?null:m.currentState,
+      events:orderedTimeline().filter(x=>!hasStaleEvidence(x)).slice(-65),
+      lastIssues:valid(m.issues).filter(x=>x.status!=='dismissed').slice(-18),
       pinnedText:m.pinnedText,dayIndex:m.dayIndex,currentStoryDate:m.absoluteDate};
     const referenced=[...new Set([...arr.fixed,...arr.events.slice(-25),...arr.lastIssues].flatMap(x=>safeArray(x.sourceIds)))].slice(-50);
     arr.originalEvidence=referenced.map(id=>({id,text:truncate(findSource(id)?.text||'',300)})).filter(x=>x.text);
@@ -1149,7 +1154,7 @@
     return s.slice(0,32000);
   }
   function recentEpisodeContext(){
-    const latest=orderedTimeline().slice(-2);
+    const latest=orderedTimeline().filter(x=>!hasStaleEvidence(x)).slice(-2);
     if(!latest.length)return '저장된 이전 에피소드 없음. 새 장면부터 시작.';
     const last=latest[latest.length-1];
     const refs=safeArray(last.sourceIds).slice(-4);
@@ -1485,19 +1490,20 @@
     const m=roomData?.memory;if(!m)return '';
     const parts=['[과거 서사 상기]','실제 대화 및 사용자 설정만 근거로 작성된 연속성 기록입니다. 확인되지 않은 사건·대사·설정을 새로 만들지 마세요.'];
     if(m.pinnedText.trim())parts.push('\n■ 사용자 고정 지침\n'+m.pinnedText.trim());
-    const timeline=orderedTimeline();
+    const timeline=orderedTimeline().filter(x=>!hasStaleEvidence(x));
     if(timeline.length){
       const byDay=new Map();
       for(const ev of timeline){const label=ev.label||'날짜 불명';if(!byDay.has(label))byDay.set(label,[]);byDay.get(label).push(ev.description);}
       parts.push('\n■ 날짜별 전체 서사\n'+[...byDay].map(([label,events])=>label+'\n'+events.map(x=>'- '+x).join('\n')).join('\n\n'));
     }
-    if(m.currentState?.summary)parts.push('\n■ 현재 진행 중인 장면\n'+m.currentState.summary);
-    if(m.emotions.length)parts.push('\n■ 현재 감정선\n'+m.emotions.map(e=>'- '+e.person+' → '+e.target+': '+e.feeling+' / 이유: '+e.reason+' / 행동: '+e.behavior).join('\n'));
-    if(m.characters.length)parts.push('\n■ 인물별 기억\n'+m.characters.map(c=>'- '+c.name+': '+[c.traits,c.family&&'가족: '+c.family,c.secrets&&'비밀: '+c.secrets].filter(Boolean).join(' / ')).join('\n'));
-    if(m.relations.length)parts.push('\n■ 현재 인물 관계\n'+m.relations.map(r=>'- '+r.a+' ↔ '+r.b+': '+r.status).join('\n'));
-    if(m.clues.length)parts.push('\n■ 복선·미해결 및 해결된 조건\n'+m.clues.map(c=>'- '+c.title+' ('+c.status+'): '+c.detail).join('\n'));
-    if(m.facts.length)parts.push('\n■ 확정 설정 및 기타 사실\n'+m.facts.map(f=>'- '+(f.tag||'설정')+': '+f.text).join('\n'));
-    if(m.knowledge.length)parts.push('\n■ 인물별 정보 공개 범위\n'+m.knowledge.map(x=>'- '+x.character+': '+x.text+' ('+x.status+')').join('\n'));
+    const valid=arr=>safeArray(arr).filter(x=>!hasStaleEvidence(x));
+    if(m.currentState?.summary&&!hasStaleEvidence(m.currentState))parts.push('\n■ 현재 진행 중인 장면\n'+m.currentState.summary);
+    if(valid(m.emotions).length)parts.push('\n■ 현재 감정선\n'+valid(m.emotions).map(e=>'- '+e.person+' → '+e.target+': '+e.feeling+' / 이유: '+e.reason+' / 행동: '+e.behavior).join('\n'));
+    if(valid(m.characters).length)parts.push('\n■ 인물별 기억\n'+valid(m.characters).map(c=>'- '+c.name+': '+[c.traits,c.family&&'가족: '+c.family,c.secrets&&'비밀: '+c.secrets].filter(Boolean).join(' / ')).join('\n'));
+    if(valid(m.relations).length)parts.push('\n■ 현재 인물 관계\n'+valid(m.relations).map(r=>'- '+r.a+' ↔ '+r.b+': '+r.status).join('\n'));
+    if(valid(m.clues).length)parts.push('\n■ 복선·미해결 및 해결된 조건\n'+valid(m.clues).map(c=>'- '+c.title+' ('+c.status+'): '+c.detail).join('\n'));
+    if(valid(m.facts).length)parts.push('\n■ 확정 설정 및 기타 사실\n'+valid(m.facts).map(f=>'- '+(f.tag||'설정')+': '+f.text).join('\n'));
+    if(valid(m.knowledge).length)parts.push('\n■ 인물별 정보 공개 범위\n'+valid(m.knowledge).map(x=>'- '+x.character+': '+x.text+' ('+x.status+')').join('\n'));
     return parts.join('\n'); // Detailed archive has no text-length or event-count limit.
   }
   function reminderCacheKey(mode){
@@ -1510,14 +1516,14 @@
     const parts=[];
     const put=(category,text)=>{if(String(text||'').trim())parts.push(category+': '+String(text).trim());};
     if(m.pinnedText)put('사용자 고정 지침',m.pinnedText);
-    for(const x of orderedTimeline())put('사건 '+(x.label||'날짜 미상'),x.description);
-    if(m.currentState?.summary)put('현재 장면',m.currentState.summary);
-    for(const x of m.characters)put('인물 '+x.name,[x.traits,x.family&&'가족 '+x.family,x.secrets&&'비밀 '+x.secrets].filter(Boolean).join(' / '));
-    for(const x of m.emotions)put('감정 '+x.person+' → '+x.target,[x.feeling,x.reason,x.behavior].filter(Boolean).join(' / '));
-    for(const x of m.relations)put('관계 '+x.a+' ↔ '+x.b,x.status);
-    for(const x of m.clues)put('미해결·복선 '+x.title+' ['+x.status+']',x.detail);
-    for(const x of m.facts)put('설정 '+(x.tag||''),x.text);
-    for(const x of m.knowledge)put('지식 '+x.character+' ['+x.status+']',x.text);
+    for(const x of orderedTimeline().filter(x=>!hasStaleEvidence(x)))put('사건 '+(x.label||'날짜 미상'),x.description);
+    if(m.currentState?.summary&&!hasStaleEvidence(m.currentState))put('현재 장면',m.currentState.summary);
+    for(const x of m.characters.filter(x=>!hasStaleEvidence(x)))put('인물 '+x.name,[x.traits,x.family&&'가족 '+x.family,x.secrets&&'비밀 '+x.secrets].filter(Boolean).join(' / '));
+    for(const x of m.emotions.filter(x=>!hasStaleEvidence(x)))put('감정 '+x.person+' → '+x.target,[x.feeling,x.reason,x.behavior].filter(Boolean).join(' / '));
+    for(const x of m.relations.filter(x=>!hasStaleEvidence(x)))put('관계 '+x.a+' ↔ '+x.b,x.status);
+    for(const x of m.clues.filter(x=>!hasStaleEvidence(x)))put('미해결·복선 '+x.title+' ['+x.status+']',x.detail);
+    for(const x of m.facts.filter(x=>!hasStaleEvidence(x)))put('설정 '+(x.tag||''),x.text);
+    for(const x of m.knowledge.filter(x=>!hasStaleEvidence(x)))put('지식 '+x.character+' ['+x.status+']',x.text);
     return parts;
   }
   function chunkSummaryParts(parts,max=19000){
@@ -1764,14 +1770,14 @@
       for(const term of extra)if(str.includes(term))score+=2;
       if(score)results.push({heading,text,sourceIds,score});
     };
-    for(const ev of roomData.memory.timeline)push(ev.label,ev.description,ev.sourceIds);
-    for(const f of roomData.memory.facts)push(f.tag||'설정',f.text,f.sourceIds);
-    for(const c of roomData.memory.characters)push(c.name,[c.traits,c.family,c.secrets].join(' '),c.sourceIds);
-    for(const r of roomData.memory.relations)push(`${r.a} ↔ ${r.b}`,r.status,r.sourceIds);
-    for(const clue of roomData.memory.clues)push(clue.title,clue.detail,clue.sourceIds);
-    for(const k of roomData.memory.knowledge)push(k.character,k.text,k.sourceIds);
-    for(const e of roomData.memory.emotions)push(e.person+' → '+e.target,e.feeling+' '+e.reason+' '+e.behavior,e.sourceIds);
-    if(roomData.memory.currentState)push('현재 장면',roomData.memory.currentState.summary,roomData.memory.currentState.sourceIds);
+    for(const ev of roomData.memory.timeline.filter(x=>!hasStaleEvidence(x)))push(ev.label,ev.description,ev.sourceIds);
+    for(const f of roomData.memory.facts.filter(x=>!hasStaleEvidence(x)))push(f.tag||'설정',f.text,f.sourceIds);
+    for(const c of roomData.memory.characters.filter(x=>!hasStaleEvidence(x)))push(c.name,[c.traits,c.family,c.secrets].join(' '),c.sourceIds);
+    for(const r of roomData.memory.relations.filter(x=>!hasStaleEvidence(x)))push(`${r.a} ↔ ${r.b}`,r.status,r.sourceIds);
+    for(const clue of roomData.memory.clues.filter(x=>!hasStaleEvidence(x)))push(clue.title,clue.detail,clue.sourceIds);
+    for(const k of roomData.memory.knowledge.filter(x=>!hasStaleEvidence(x)))push(k.character,k.text,k.sourceIds);
+    for(const e of roomData.memory.emotions.filter(x=>!hasStaleEvidence(x)))push(e.person+' → '+e.target,e.feeling+' '+e.reason+' '+e.behavior,e.sourceIds);
+    if(roomData.memory.currentState&&!hasStaleEvidence(roomData.memory.currentState))push('현재 장면',roomData.memory.currentState.summary,roomData.memory.currentState.sourceIds);
     for(const m of orderedMessages())push(m.speaker,m.text,[m.id]);
     results.sort((a,b)=>b.score-a.score);
     return results.slice(0,45);
