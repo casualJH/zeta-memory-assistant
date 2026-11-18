@@ -228,6 +228,7 @@
       else roomData.reviewQueue.push({sourceId:id,changedAt:at,status:'needs-review'});
     }
     ui.reminderCache=null;
+    ui.lastOutput='';ui.searchAnswer='';ui.searchResults=[];
     mem.updatedAt=at;
     return affected;
   }
@@ -1048,7 +1049,7 @@
       const sameArc=!!arcKey&&!!previous?.arcKey&&previous.arcKey===arcKey;
       const sameFocus=!!focusKey&&!!previous?.focusKey&&previous.focusKey===focusKey;
       const explicitContinuation=ev?.continuesPreviousEpisode===true;
-      const compatible=previous&&!previous.manual&&previous.label===label&&
+      const compatible=previous&&!previous.manual&&!hasStaleEvidence(previous)&&previous.label===label&&
         previous.timeType===(historical?'past':'present')&&advance===0;
       const canJoin=compatible&&continuous&&!startsNewArc&&
         previous.description.length+description.length<9000&&sameArc&&sameFocus&&sameEpisode&&
