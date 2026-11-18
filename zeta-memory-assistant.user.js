@@ -59,6 +59,8 @@
     else attach();
     return;
   }
+  // Never mount a second UI inside other same-origin subframes.
+  if(window.top!==window)return;
   if (window.__zetaMemoryAssistantV1) return;
   window.__zetaMemoryAssistantV1 = true;
   const VERSION = '0.4.0';
