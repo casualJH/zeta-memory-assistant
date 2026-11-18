@@ -90,7 +90,7 @@
   let batchQueue=Promise.resolve();
   let runtimeStatus='대화방을 열어 주세요.';
   let profileLoadRequestedRoom=null;
-  let usageCache=null;
+  let usageCache=null,reviewBusy=false;
   let directControl=null;
   let bridgeDiagnostics={mode:'대기',roomSource:'없음',apiSeen:0,authorization:false};
 
@@ -289,6 +289,7 @@
     const item=reviewItem(kind,id);
     if(!item||item.reviewStatus!=='needs-review')return setStatus('재검토할 기억이 없습니다.');
     if(!getApiKey())return setStatus('Gemini 제안에는 API 키가 필요합니다. 직접 근거를 확인하고 처리할 수도 있습니다.');
+    if(reviewBusy)return setStatus('이미 다른 근거를 검토하고 있습니다.');
     if(analysisBusy||syncBusy)return setStatus('대화 수집·분석 종료 후 재검토해 주세요.');
     const room=activeRoom,epoch=syncEpoch,modelText=reviewText(item,kind);
     const evidence=reviewEvidence(item),fingerprint=reviewFingerprint(item);
@@ -308,6 +309,7 @@
       '[기억 종류]\n'+kind+'\n[기존 기억]\n'+modelText+
       '\n[현재 유효 원문]\n'+JSON.stringify(evidence)+
       '\n[참고용 이전 버전]\n'+JSON.stringify(history);
+    reviewBusy=true;
     setStatus('Gemini가 변경된 원문에 연결된 기억을 검토 중…');
     try{
       const result=await askGemini(prompt,1800,room);
@@ -323,14 +325,16 @@
         supportingSourceIds:ids,supportingQuote:quoteValid?quote:'',fingerprint,at:Date.now()};
       await saveRoom();render();setStatus('AI 재검토 제안 준비 완료 · 최종 판단은 사용자가 결정합니다.');
     }catch(e){setStatus('재검토 제안 실패: '+String(e.message||e));}
+    finally{reviewBusy=false;}
   }
   async function decideMemoryReview(kind,id,choice){
     const item=reviewItem(kind,id);
     if(!item||item.reviewStatus!=='needs-review')return setStatus('재검토 대기 항목이 아닙니다.');
     if(analysisBusy||syncBusy)return setStatus('대화 수집 또는 분석 종료 후 진행해 주세요.');
-    if(choice==='valid'&&(!reviewProposalValid(item)||item.reviewProposal.verdict!=='supported'))
-      return setStatus('현재 근거를 뒷받침하는 AI 검토 제안을 먼저 받아야 유효 확정할 수 있습니다.');
-    const notice=choice==='valid'?'현재 원문이 해당 기억을 뒷받침한다고 확정할까요? 원문이 다시 바뀌면 재검토됩니다.':
+    if(choice==='valid'&&!reviewEvidence(item).some(x=>!x.missing))
+      return setStatus('현재 원문 근거가 없어 유효로 확정할 수 없습니다.');
+    const aiCaution=reviewProposalValid(item)&&item.reviewProposal.verdict!=='supported'?' (AI 제안은 근거 부족 또는 불일치입니다.)':'';
+    const notice=choice==='valid'?'실제 현재 원문을 직접 확인했고 해당 기억을 유지할까요?'+aiCaution+' 원문이 다시 바뀌면 재검토됩니다.':
       '해당 기억을 무효 처리할까요? 내용은 삭제하지 않지만 AI 상기·검색에서는 제외됩니다.';
     if(!confirm(notice))return;
     const previous=JSON.parse(JSON.stringify(item));
