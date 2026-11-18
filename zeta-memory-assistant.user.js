@@ -274,6 +274,12 @@
   function reviewFingerprint(item){
     return JSON.stringify(reviewEvidence(item).map(x=>[x.id,x.revision||0,x.text||'',!!x.missing]));
   }
+  function reviewEvidenceStamp(item){
+    const input=reviewFingerprint(item);
+    let hash=2166136261;
+    for(let i=0;i<input.length;i++)hash=Math.imul(hash^input.charCodeAt(i),16777619);
+    return (hash>>>0).toString(16);
+  }
   function reviewProposalValid(item){
     return item?.reviewProposal&&item.reviewProposal.fingerprint===reviewFingerprint(item);
   }
@@ -327,9 +333,11 @@
     }catch(e){setStatus('재검토 제안 실패: '+String(e.message||e));}
     finally{reviewBusy=false;}
   }
-  async function decideMemoryReview(kind,id,choice){
+  async function decideMemoryReview(kind,id,choice,stamp){
     const item=reviewItem(kind,id);
     if(!item||item.reviewStatus!=='needs-review')return setStatus('재검토 대기 항목이 아닙니다.');
+    if(!stamp||stamp!==reviewEvidenceStamp(item))return setStatus('표시 이후 원문이 바뀌었습니다. 재검토 화면을 새로고침해 주세요.');
+    if(item.reviewProposal&&!reviewProposalValid(item))return setStatus('이전 검토 제안의 근거가 변경됐습니다. 현재 버전으로 다시 검토해 주세요.');
     if(analysisBusy||syncBusy)return setStatus('대화 수집 또는 분석 종료 후 진행해 주세요.');
     if(choice==='valid'&&!reviewEvidence(item).some(x=>!x.missing))
       return setStatus('현재 원문 근거가 없어 유효로 확정할 수 없습니다.');
@@ -337,6 +345,7 @@
     const notice=choice==='valid'?'실제 현재 원문을 직접 확인했고 해당 기억을 유지할까요?'+aiCaution+' 원문이 다시 바뀌면 재검토됩니다.':
       '해당 기억을 무효 처리할까요? 내용은 삭제하지 않지만 AI 상기·검색에서는 제외됩니다.';
     if(!confirm(notice))return;
+    if(stamp!==reviewEvidenceStamp(item))return setStatus('확인 중 원문이 다시 변경되어 처리를 취소했습니다.');
     const previous=JSON.parse(JSON.stringify(item));
     item.reviewStatus=choice==='valid'?'valid':'invalid';
     item.reviewedAt=Date.now();
@@ -1864,6 +1873,7 @@
       const proposal=reviewProposalValid(item)?item.reviewProposal:null;
       const sourceRows=reviewEvidence(item);
       const validSources=sourceRows.filter(x=>!x.missing);
+      const stamp=reviewEvidenceStamp(item);
       const badge=item.reviewStatus==='invalid'?'무효 · 보관 중':item.manual?'수동 기억 · 근거 재검토':'재검토 필요 · AI 검색/상기 제외';
       const verdictLabel={supported:'현재 원문에 근거 있음 (AI 제안)',unsupported:'기존 기억과 근거 불일치 (AI 제안)',uncertain:'판정 불가 (AI 제안)'};
       return '<article class="zmm-item zmm-review-item">'+
@@ -1877,8 +1887,8 @@
           (proposal.supportingQuote?'<p>현재 원문 인용: "'+esc(proposal.supportingQuote)+'"</p>':'')+'</div>':'')+
         (item.reviewStatus==='needs-review'?
           '<div class="zmm-row"><button data-act="review-ai" data-kind="'+esc(kind)+'" data-id="'+esc(item.id)+'">Gemini 검토 제안</button>'+
-          '<button data-act="review-valid" data-kind="'+esc(kind)+'" data-id="'+esc(item.id)+'" '+(validSources.length?'':'disabled')+'>근거 확인 후 유지</button>'+
-          '<button data-act="review-invalid" data-kind="'+esc(kind)+'" data-id="'+esc(item.id)+'">무효로 표시</button></div>':
+          '<button data-act="review-valid" data-kind="'+esc(kind)+'" data-id="'+esc(item.id)+'" data-stamp="'+esc(stamp)+'" '+(validSources.length?'':'disabled')+'>근거 확인 후 유지</button>'+
+          '<button data-act="review-invalid" data-kind="'+esc(kind)+'" data-id="'+esc(item.id)+'" data-stamp="'+esc(stamp)+'">무효로 표시</button></div>':
           '<p class="zmm-muted">무효로 확정한 기록은 삭제되지 않으며, 현재 Gemini 기억 검색·서사 상기에서 제외됩니다.</p>')+
         '</article>';
     };
@@ -2124,7 +2134,7 @@
     if(act==='people-subtab'){ui.peopleSubtab=button.dataset.subtab==='profiles'?'profiles':'memory';ui.edit=null;ui.previewSource=null;render();content.scrollTop=0;return;}
     if(act==='load-chat-profiles'){await loadChatProfiles();return;}
     if(act==='review-ai'){await proposeMemoryReview(kind,id);return;}
-    if(act==='review-valid'||act==='review-invalid'){await decideMemoryReview(kind,id,act==='review-valid'?'valid':'invalid');return;}
+    if(act==='review-valid'||act==='review-invalid'){await decideMemoryReview(kind,id,act==='review-valid'?'valid':'invalid',button.dataset.stamp);return;}
     if(act==='timeline-selection-toggle'){ui.timelineSelectionMode=!ui.timelineSelectionMode;ui.timelineSelection=[];render();return;}
     if(act==='timeline-select-clear'){ui.timelineSelection=[];render();return;}
     if(act==='timeline-select-all'){
