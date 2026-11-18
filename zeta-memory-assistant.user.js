@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         제타 기억력 보조
 // @namespace    zeta-memory-assistant
-// @version      0.4.1
+// @version      0.4.2
 // @description  과거 대화 로컬 보관, Gemini 서사 기억, 모순 의심 표시, 정정·상기 복사, 기억 검색
 // @updateURL    https://raw.githubusercontent.com/casualJH/zeta-memory-assistant/main/zeta-memory-assistant.user.js
 // @downloadURL  https://raw.githubusercontent.com/casualJH/zeta-memory-assistant/main/zeta-memory-assistant.user.js
@@ -63,7 +63,7 @@
   if(window.top!==window)return;
   if (window.__zetaMemoryAssistantV1) return;
   window.__zetaMemoryAssistantV1 = true;
-  const VERSION = '0.4.1';
+  const VERSION = '0.4.2';
   const DB_NAME = 'zeta-memory-assistant-db-v1';
   const UUID = /^[0-9a-f]{8}-(?:[0-9a-f]{4}-){3}[0-9a-f]{12}$/i;
   const CHANNEL = 'zmm-' + Array.from(crypto.getRandomValues(new Uint8Array(12)), n => n.toString(16).padStart(2, '0')).join('');
@@ -371,7 +371,7 @@
       setStatus('재검토 결과 저장 실패: '+String(e.message||e));
     }
   }
-  function hasStaleEvidence(item){return item?.['needs-review','invalid'].includes(item?.reviewStatus)&&(!item.manual||item.reviewStatus==='invalid');}
+  function hasStaleEvidence(item){return !!item&&['needs-review','invalid'].includes(item.reviewStatus)&&(!item.manual||item.reviewStatus==='invalid');}
   async function saveRoom(){if(!roomData)return;roomData.updatedAt=Date.now();await dbPut('rooms',roomData);}
   function orderedMessages(){return [...msgMap.values()].sort((a,b)=>{
     const ta=Date.parse(a.time)||0,tb=Date.parse(b.time)||0;
@@ -1057,6 +1057,33 @@
     if(/일주일\s*(?:후|뒤|지나)/.test(s))return 7;
     return 0;
   }
+  // Independent memory function and epistemic status. Legacy records are unclassified.
+  const MEMORY_CLASS_VALUES=['fixed_setting','current_state','past_event','unclassified'];
+  const EVIDENCE_CLASS_VALUES=['objective_narration','character_claim','inference','unclassified'];
+  const MEMORY_CLASS_LABELS={fixed_setting:'고정 설정',current_state:'현재 상태',past_event:'과거 사건',unclassified:'유형 미분류'};
+  const EVIDENCE_CLASS_LABELS={objective_narration:'객관적 서술',character_claim:'인물의 주장',inference:'추론',unclassified:'근거 성격 미확인'};
+  function normalizedMemoryClass(v){return MEMORY_CLASS_VALUES.includes(v)?v:'unclassified';}
+  function normalizedEvidenceClass(v){return EVIDENCE_CLASS_VALUES.includes(v)?v:'unclassified';}
+  function classificationFromModel(raw,sourceIds){
+    const memoryClass=normalizedMemoryClass(raw?.memoryClass);
+    let evidenceClass=normalizedEvidenceClass(raw?.evidenceClass);
+    // Position alone is not proof. Do not classify unknown/user/mixed blocks as objective.
+    const rows=safeArray(sourceIds).map(findSource).filter(Boolean);
+    if(evidenceClass==='objective_narration' &&
+      (!rows.length||rows.some(row=>row.position!=='NARRATOR'||row.role==='user')))
+      evidenceClass='unclassified';
+    return {memoryClass,evidenceClass};
+  }
+  function classificationBadges(item){
+    const mc=normalizedMemoryClass(item?.memoryClass),ec=normalizedEvidenceClass(item?.evidenceClass);
+    return '<span class="zmm-pill">'+esc(MEMORY_CLASS_LABELS[mc])+'</span> '+
+      '<span class="zmm-pill">'+esc(EVIDENCE_CLASS_LABELS[ec])+'</span>';
+  }
+  function retainClassification(item,next){
+    if(!item||item.manual||!next)return;
+    if(item.memoryClass==null)item.memoryClass=next.memoryClass;
+    if(item.evidenceClass==null)item.evidenceClass=next.evidenceClass;
+  }
   function normalizeImportance(v){return ['critical','high','normal','low'].includes(v)?v:'normal';}
   function normalizedInfo(v,n=700){const text=ensureShort(v,n);return /^(?:null|undefined|none|unknown|n\/a|정보\s*없음)$/i.test(text)?'':text;}
   function sourceIndexMap(){
@@ -1099,12 +1126,13 @@
       if(!quotesVerified(text,original))continue;
       const dedupe=target.find(x=>!hasStaleEvidence(x)&&(x.text===text||x.description===text||x.detail===text||x.title===text));
       if(dedupe){
+        retainClassification(dedupe,classificationFromModel(raw,sourceIds));
         dedupe.sourceIds=[...new Set([...(dedupe.sourceIds||[]),...sourceIds])].slice(0,20);
         if(kind==='clues'&&!dedupe.manual&&['open','solved','hold'].includes(raw.status))dedupe.status=raw.status;
         if(kind==='knowledge'&&!dedupe.manual&&['knows','unknown','partial'].includes(raw.status))dedupe.status=raw.status;
         continue;
       }
-      const item={id:newId(kind),sourceIds,importance:normalizeImportance(raw.importance),manual:false};
+      const item={id:newId(kind),sourceIds,importance:normalizeImportance(raw.importance),manual:false,...classificationFromModel(raw,sourceIds)};
       if(kind==='facts')Object.assign(item,{text,tag:ensureShort(raw.tag,60)});
       else if(kind==='clues')Object.assign(item,{title:ensureShort(raw.title||text,120),detail:text,status:['open','solved','hold'].includes(raw.status)?raw.status:'open'});
       else if(kind==='knowledge')Object.assign(item,{character:ensureShort(raw.character,90),text,status:['knows','unknown','partial'].includes(raw.status)?raw.status:'knows'});
@@ -1191,7 +1219,10 @@
       const explicitContinuation=ev?.continuesPreviousEpisode===true;
       const compatible=previous&&!previous.manual&&!hasStaleEvidence(previous)&&previous.label===label&&
         previous.timeType===(historical?'past':'present')&&advance===0;
+      const classification=classificationFromModel(ev,sourceIds);
       const canJoin=compatible&&continuous&&!startsNewArc&&
+        normalizedMemoryClass(previous.memoryClass)===classification.memoryClass&&
+        normalizedEvidenceClass(previous.evidenceClass)===classification.evidenceClass&&
         previous.description.length+description.length<9000&&sameArc&&sameFocus&&sameEpisode&&
         explicitContinuation&&shift==='same_arc';
       if(canJoin){
@@ -1204,7 +1235,7 @@
       mem.timeline.push({id:newId('event'),title,label,dayIndex:historical?null:mem.dayIndex,
         storyDate:occurrenceDate||(!historical?mem.absoluteDate:null),timeType:historical?'past':'present',
         revealDayIndex:mem.dayIndex,orderInSource:sequence,description,
-        sourceIds,episodeKey,arcKey,focusKey,importance:normalizeImportance(ev.importance),manual:false});
+        sourceIds,episodeKey,arcKey,focusKey,importance:normalizeImportance(ev.importance),manual:false,...classification});
       changed++;
     }
     changed+=mergeItems(mem.facts,delta.facts,allowed,'facts');
@@ -1214,17 +1245,18 @@
       const name=ensureShort(c.name,100),sources=sanitizeSources(c.sourceIds,allowed);if(!name||!sources.length)continue;
       const old=mem.characters.find(x=>x.name===name&&!hasStaleEvidence(x));
       if(old){
+        retainClassification(old,classificationFromModel(c,sources));
         if(!old.manual){old.traits=normalizedInfo(c.traits||old.traits,1200);old.secrets=normalizedInfo(c.secrets||old.secrets,900);old.family=normalizedInfo(c.family||old.family,900);}
         old.sourceIds=[...new Set([...old.sourceIds,...sources])].slice(-25);
-      }else{mem.characters.push({id:newId('person'),name,traits:normalizedInfo(c.traits,1200),secrets:normalizedInfo(c.secrets,900),family:normalizedInfo(c.family,900),sourceIds:sources,manual:false});changed++;}
+      }else{mem.characters.push({id:newId('person'),name,traits:normalizedInfo(c.traits,1200),secrets:normalizedInfo(c.secrets,900),family:normalizedInfo(c.family,900),sourceIds:sources,manual:false,...classificationFromModel(c,sources)});changed++;}
     }
     for(const r of safeArray(delta.relations).slice(0,40)){
       const a=ensureShort(r.a,90),b=ensureShort(r.b,90),sources=sanitizeSources(r.sourceIds,allowed);
       if(!a||!b||!sources.length||a===b)continue;
       let existing=mem.relations.find(x=>!hasStaleEvidence(x)&&((x.a===a&&x.b===b)||(x.a===b&&x.b===a)));
       const status=normalizedInfo(r.status,1400);
-      if(existing){if(!existing.manual&&status)existing.status=status;existing.history.push({status,sourceIds:sources});existing.history=existing.history.slice(-30);existing.sourceIds=[...new Set([...existing.sourceIds,...sources])].slice(-25);}
-      else{existing={id:newId('relation'),a,b,status,history:[{status,sourceIds:sources}],sourceIds:sources,manual:false};mem.relations.push(existing);changed++;}
+      if(existing){retainClassification(existing,classificationFromModel(r,sources));if(!existing.manual&&status)existing.status=status;existing.history.push({status,sourceIds:sources});existing.history=existing.history.slice(-30);existing.sourceIds=[...new Set([...existing.sourceIds,...sources])].slice(-25);}
+      else{existing={id:newId('relation'),a,b,status,history:[{status,sourceIds:sources}],sourceIds:sources,manual:false,...classificationFromModel(r,sources)};mem.relations.push(existing);changed++;}
     }
     for(const raw of safeArray(delta.emotions).slice(0,70)){
       const person=normalizedInfo(raw?.person,100),target=normalizedInfo(raw?.target,100);
@@ -1232,10 +1264,10 @@
       const feeling=normalizedInfo(raw?.feeling,350),reason=normalizedInfo(raw?.reason,900),behavior=normalizedInfo(raw?.behavior,900);
       if(!person||!target||!feeling||!sources.length)continue;
       const existing=mem.emotions.find(x=>!hasStaleEvidence(x)&&x.person===person&&x.target===target);
-      if(existing){if(!existing.manual){existing.feeling=feeling;existing.reason=reason;existing.behavior=behavior;existing.certainty=raw.certainty==='inferred'?'inferred':'explicit';}
+      if(existing){retainClassification(existing,classificationFromModel(raw,sources));if(!existing.manual){existing.feeling=feeling;existing.reason=reason;existing.behavior=behavior;existing.certainty=raw.certainty==='inferred'?'inferred':'explicit';}
         existing.sourceIds=[...new Set([...safeArray(existing.sourceIds),...sources])].slice(-25);}
       else{mem.emotions.push({id:newId('emotion'),person,target,feeling,reason,behavior,
-        certainty:raw.certainty==='inferred'?'inferred':'explicit',sourceIds:sources,manual:false});changed++;}
+        certainty:raw.certainty==='inferred'?'inferred':'explicit',sourceIds:sources,manual:false,...classificationFromModel(raw,sources)});changed++;}
     }
     if(delta.currentState&&typeof delta.currentState==='object'){
       const state=delta.currentState,sources=sanitizeSources(state.sourceIds,allowed);
@@ -1243,7 +1275,7 @@
       if(summary&&sources.length&&quotesVerified(summary,sources.map(id=>idMap.get(id)?.text||'').join('\n'))){
         if(!mem.currentState?.manual&&!hasStaleEvidence(mem.currentState)){mem.currentState={id:mem.currentState?.id||newId('state'),summary,
           location:normalizedInfo(state.location,350),people:normalizedInfo(state.people,500),
-          conflict:normalizedInfo(state.conflict,700),sourceIds:sources,manual:false};changed++;}
+          conflict:normalizedInfo(state.conflict,700),sourceIds:sources,manual:false,...classificationFromModel(state,sources)};changed++;}
       }
     }
     // Reject roleplay disagreements, deception and emotional conflict. This detects
@@ -1276,7 +1308,7 @@
       if(!older.length)continue;
       if(mem.issues.some(x=>x.quote===quote&&safeArray(x.sourceIds).some(id=>newest.includes(id))))continue;
       mem.issues.push({id:newId('issue'),quote,reason,correction,evidenceQuote,errorType:type,
-        sourceIds:newest,evidenceIds:older,status:'open',manual:false});changed++;
+        sourceIds:newest,evidenceIds:older,status:'open',manual:false,...classificationFromModel(issue,newest)});changed++;
     }
     // Attach observed source revisions to AI-produced memory. Older records
     // without this map remain readable; manual memories are never overwritten.
