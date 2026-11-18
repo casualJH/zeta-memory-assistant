@@ -2227,7 +2227,7 @@
     if(act==='add-fact'){
       const text=prompt('고정할 핵심 설정을 입력하세요 (수동 입력)');
       if(text?.trim()){
-        roomData.memory.facts.push({id:newId('manual'),text:ensureShort(text,1500),tag:'사용자 고정',sourceIds:[],manual:true,importance:'critical'});
+        roomData.memory.facts.push({id:newId('manual'),text:ensureShort(text,1500),tag:'사용자 고정',sourceIds:[],manual:true,importance:'critical',memoryClass:'fixed_setting',evidenceClass:'unclassified'});
         await saveRoom();render();
       }return;
     }
