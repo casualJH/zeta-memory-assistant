@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         제타 기억력 보조
 // @namespace    zeta-memory-assistant
-// @version      0.3.1
+// @version      0.4.0
 // @description  과거 대화 로컬 보관, Gemini 서사 기억, 모순 의심 표시, 정정·상기 복사, 기억 검색
 // @updateURL    https://raw.githubusercontent.com/casualJH/zeta-memory-assistant/main/zeta-memory-assistant.user.js
 // @downloadURL  https://raw.githubusercontent.com/casualJH/zeta-memory-assistant/main/zeta-memory-assistant.user.js
@@ -9,9 +9,9 @@
 // @author       zeta-memory-assistant
 // @match        https://zeta-ai.io/*
 // @match        https://*.zeta-ai.io/*
+// @match        https://frame.pingpong.ai/*
 // @run-at       document-start
 // @sandbox      raw
-// @noframes
 // @grant        GM_getValue
 // @grant        GM_setValue
 // @grant        GM_xmlhttpRequest
@@ -29,9 +29,39 @@
  */
 (() => {
   'use strict';
+  // The chat UI is served from a cross-origin scene iframe. Keep the complete
+  // userscript match list, but run only this narrow reporter inside the iframe.
+  // Parent remains the single owner of IndexedDB and all user-facing UI.
+  if(location.origin==='https://frame.pingpong.ai'){
+    if(!/^\/v\d+\/index\.html(?:$|\/)/.test(location.pathname))return;
+    if(window.__zmmFrameReporterV1)return;
+    window.__zmmFrameReporterV1=true;
+    const report=()=>{
+      try{window.parent.postMessage({tag:'zmm-frame-change',kind:'chat-dom'},'https://zeta-ai.io');}
+      catch(e){}
+    };
+    let queued=false;
+    const notify=()=>{
+      if(queued)return;
+      queued=true;
+      setTimeout(()=>{queued=false;report();},1000);
+    };
+    const attach=()=>{
+      const body=document.body;
+      if(!body)return;
+      const obs=new MutationObserver(records=>{
+        if(records.some(r=>r.target instanceof Node&&!r.target.closest?.('#zmm-panel')))notify();
+      });
+      obs.observe(body,{childList:true,subtree:true,characterData:true});
+      report();
+    };
+    if(document.readyState==='loading')document.addEventListener('DOMContentLoaded',attach,{once:true});
+    else attach();
+    return;
+  }
   if (window.__zetaMemoryAssistantV1) return;
   window.__zetaMemoryAssistantV1 = true;
-  const VERSION = '0.3.1';
+  const VERSION = '0.4.0';
   const DB_NAME = 'zeta-memory-assistant-db-v1';
   const UUID = /^[0-9a-f]{8}-(?:[0-9a-f]{4}-){3}[0-9a-f]{12}$/i;
   const CHANNEL = 'zmm-' + Array.from(crypto.getRandomValues(new Uint8Array(12)), n => n.toString(16).padStart(2, '0')).join('');
@@ -1956,6 +1986,14 @@
       if(ranges.length)CSS.highlights.set('zmm-conflict',new Highlight(...ranges));
     }
   }
+  function installIframeWatch(){
+    window.addEventListener('message',event=>{
+      if(event.origin!=='https://frame.pingpong.ai'||event.data?.tag!=='zmm-frame-change')return;
+      const scene=[...document.querySelectorAll('iframe[title="scene"]')];
+      if(!scene.some(frame=>frame.contentWindow===event.source))return;
+      if(activeRoom&&roomData?.fullyLoaded)scheduleLatest(2100);
+    });
+  }
   function installDomWatch(){
     let observed=false;
     const init=()=>{
@@ -2249,7 +2287,7 @@
   });
   function init(){
     apiSettings={...apiSettings,...getSettings()};
-    installBridge();installDomWatch();
+    installBridge();installDomWatch();installIframeWatch();
     const ready=()=>{mount();sendBridge('identify');};
     if(document.readyState==='loading')document.addEventListener('DOMContentLoaded',ready,{once:true});else ready();
     setInterval(()=>{if(!mounted&&document.body)ready();},1400);
