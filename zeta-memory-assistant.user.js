@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         제타 기억력 보조
 // @namespace    zeta-memory-assistant
-// @version      0.4.2
+// @version      0.4.3
 // @description  과거 대화 로컬 보관, Gemini 서사 기억, 모순 의심 표시, 정정·상기 복사, 기억 검색
 // @updateURL    https://raw.githubusercontent.com/casualJH/zeta-memory-assistant/main/zeta-memory-assistant.user.js
 // @downloadURL  https://raw.githubusercontent.com/casualJH/zeta-memory-assistant/main/zeta-memory-assistant.user.js
@@ -63,7 +63,7 @@
   if(window.top!==window)return;
   if (window.__zetaMemoryAssistantV1) return;
   window.__zetaMemoryAssistantV1 = true;
-  const VERSION = '0.4.2';
+  const VERSION = '0.4.3';
   const DB_NAME = 'zeta-memory-assistant-db-v1';
   const UUID = /^[0-9a-f]{8}-(?:[0-9a-f]{4}-){3}[0-9a-f]{12}$/i;
   const CHANNEL = 'zmm-' + Array.from(crypto.getRandomValues(new Uint8Array(12)), n => n.toString(16).padStart(2, '0')).join('');
@@ -71,7 +71,8 @@
   const RECOMMENDED_MODELS = ['gemini-3.1-flash-lite','gemini-3.5-flash-lite','gemini-2.5-flash-lite','gemini-2.5-flash'];
   const MODEL_PRICES = {'gemini-3.1-flash-lite':[0.25,1.50],'gemini-3.5-flash-lite':[0.30,2.50],'gemini-2.5-flash-lite':[0.10,0.40],'gemini-2.5-flash':[0.30,2.50]};
   const MAX_CHUNK = 6500;
-  const AUTO_ANALYSIS_MIN_CONVERSATIONS = 10;
+  const AUTO_ANALYSIS_DEFAULT_INTERVAL = 10;
+  const AUTO_ANALYSIS_INTERVALS = [1,5,10];
   const SAFETY = ['HARM_CATEGORY_HARASSMENT','HARM_CATEGORY_HATE_SPEECH','HARM_CATEGORY_SEXUALLY_EXPLICIT','HARM_CATEGORY_DANGEROUS_CONTENT']
     .map(category => ({category,threshold:'BLOCK_NONE'}));
   const $ = (selector, root=document) => root.querySelector(selector);
@@ -84,7 +85,7 @@
   let msgMap=new Map(), analysisBusy=false, analysisStop=false, syncBusy=false, syncEpoch=0;
   let pageButton=null, panel=null, content=null, note=null;
   let tab='home', ui={edit:null,searchResults:[],searchAnswer:'',searchQuestion:'',previewSource:null,previewVersions:{},summaryLength:'normal',lastOutput:'',reminderCache:null,reminderBusy:false,timelineSelection:[],timelineSelectionMode:false,peopleSubtab:'memory',buttonPos:null,dragged:false};
-  let apiSettings={auto:true,model:BASE_MODEL,billingMode:'free',inputRate:0.25,outputRate:1.50};
+  let apiSettings={auto:true,autoInterval:AUTO_ANALYSIS_DEFAULT_INTERVAL,model:BASE_MODEL,billingMode:'free',inputRate:0.25,outputRate:1.50};
   let availableModels=[],modelFetchNote='아래 추천 모델 중 선택하거나 API 키로 모델 목록을 불러오세요.';
   let lastLiveSync=0, latestTimer=0, updateTimer=0, currentBridgeRoom=null;
   let batchQueue=Promise.resolve();
@@ -890,14 +891,22 @@
     const processed=new Set(roomData.memory.processedIds);
     return messageGroups().filter(group=>!processed.has(group.id)&&!excludedFromAnalysis(group)).length;
   }
+  // Wait for an AI reply before counting a completed conversation.
+  function pendingCompleteReplyCount(){
+    if(!roomData)return 0;
+    const processed=new Set(roomData.memory.processedIds);
+    return messageGroups().filter(group=>!processed.has(group.id)&&!excludedFromAnalysis(group)&&
+      group.rows.some(m=>m.role==='character'&&m.kind==='text')).length;
+  }
   function scheduleAnalysis(ms=2500){
     clearTimeout(updateTimer);
+    if(!apiSettings.auto)return;
     updateTimer=setTimeout(()=>{
       if(!apiSettings.auto||!roomData?.fullyLoaded||!getApiKey()||analysisBusy||syncBusy)return;
-      const pending=unanalysedConversationCount();
-      if(pending<AUTO_ANALYSIS_MIN_CONVERSATIONS)return;
-      analyzePending().catch(e=>setStatus('자동 분석 오류: '+String(e.message||e)));
-    },ms);
+      const required=AUTO_ANALYSIS_INTERVALS.includes(apiSettings.autoInterval)?apiSettings.autoInterval:AUTO_ANALYSIS_DEFAULT_INTERVAL;
+      if(pendingCompleteReplyCount()<required)return;
+      analyzePending(true).catch(e=>setStatus('자동 분석 오류: '+String(e.message||e)));
+    },Math.max(ms,2800));
   }
   async function receiveBridgeData(d){
     if(!d||d.tag!=='zmm-page'||d.channel!==CHANNEL)return;
@@ -940,7 +949,7 @@
   function getSettings(){
     try{const v=GM_getValue('zmm-settings',{});return v&&typeof v==='object'?v:{};}catch{return{};}
   }
-  function saveSettings(){GM_setValue('zmm-settings',{auto:apiSettings.auto,model:apiSettings.model,billingMode:apiSettings.billingMode,inputRate:apiSettings.inputRate,outputRate:apiSettings.outputRate});}
+  function saveSettings(){GM_setValue('zmm-settings',{auto:apiSettings.auto,autoInterval:apiSettings.autoInterval,model:apiSettings.model,billingMode:apiSettings.billingMode,inputRate:apiSettings.inputRate,outputRate:apiSettings.outputRate});}
   function modelLabel(model){
     const id=String(model.id||'');
     const lite=/flash[- ]?lite/i.test(id+' '+(model.label||''));
@@ -1408,8 +1417,14 @@
       '\n\n[현재 저장된 등장인물·유저 프로필 — 배경 참고 전용, 사건 증거 아님]\n'+analysisProfileReference()+
       '\n\n[이번 입력의 전체 대화 원문 — 빠짐없이 확인]\n'+JSON.stringify(payload);
   }
-  function pendingChunks(){
-    const processed=new Set(roomData.memory.processedIds),groups=messageGroups().filter(g=>!processed.has(g.id)&&!excludedFromAnalysis(g));
+  function pendingChunks(onlyCompleteReplies=false){
+    const processed=new Set(roomData.memory.processedIds);
+    let groups=messageGroups().filter(g=>!processed.has(g.id)&&!excludedFromAnalysis(g));
+    if(onlyCompleteReplies){
+      // Leave unanswered trailing user messages for a later batch.
+      const lastComplete=groups.findLastIndex(g=>g.rows.some(m=>m.role==='character'&&m.kind==='text'));
+      groups=lastComplete<0?[]:groups.slice(0,lastComplete+1);
+    }
     const out=[];let batch=[],chars=0;
     for(const group of groups){
       const add=group.rows.reduce((n,m)=>n+m.text.length,0);
@@ -1420,7 +1435,7 @@
     if(batch.length)out.push(batch);
     return out;
   }
-  async function analyzePending(){
+  async function analyzePending(onlyCompleteReplies=false){
     if(analysisBusy)return;
     if(!roomData||!activeRoom)return setStatus('채팅방을 먼저 열어 주세요.');
     if(!getApiKey())return setStatus('Gemini API 키가 없어 분석할 수 없습니다. 설정에서 입력해 주세요.');
@@ -1430,7 +1445,7 @@
     try{
       let count=0;
       while(!analysisStop&&room===activeRoom&&epoch===syncEpoch){
-        const chunks=pendingChunks();if(!chunks.length){setStatus('기억 분석 완료 · 처리할 새 대화가 없습니다.');break;}
+        const chunks=pendingChunks(onlyCompleteReplies);if(!chunks.length){setStatus('기억 분석 완료 · 처리할 새 대화가 없습니다.');break;}
         const rows=chunks[0];
         setStatus(`Gemini 분석 중 · 이번 묶음 ${rows.length}개 · 남은 묶음 ${chunks.length}개`);
         let delta;
@@ -1491,8 +1506,11 @@
       <div class="zmm-row"><button data-act="tab" data-tab="review">변경 원문 연결 기억 검토</button></div>
       <div class="zmm-row"><button class="zmm-main" data-act="full">과거 대화 전체 불러오기</button><button data-act="latest">최신 대화 확인</button></div>
       <div class="zmm-row"><button class="zmm-main" data-act="analyze">${analysisBusy?'분석 중…':'미분석 대화 요약'}</button><button data-act="stop">중지</button></div>
-      <p class="zmm-muted">최초 1회 전체 수집이 완료되어야 분석할 수 있습니다. 자동 분석은 미분석 대화가 10개 이상 쌓이면 실행되며, 수동 요약은 개수에 관계없이 실행할 수 있습니다. API 키가 없으면 자동 분석하지 않습니다.</p>
+      <p class="zmm-muted">최초 1회 전체 수집이 완료되어야 분석할 수 있습니다. 자동 분석은 선택한 주기만큼 AI 응답이 완료되면 실행됩니다. 답변이 없는 사용자 입력은 다음 분석까지 대기하며, 수동 요약은 개수에 관계없이 실행할 수 있습니다. API 키가 없으면 자동 분석하지 않습니다.</p>
       <label class="zmm-line"><span>새 대화 자동 분석</span><input id="zmm-auto-home" type="checkbox" data-field="auto" ${apiSettings.auto?'checked':''}></label>
+      <label class="zmm-line"><span>자동 분석 주기</span><select data-field="autoInterval" ${apiSettings.auto?'':'disabled'}>
+        ${AUTO_ANALYSIS_INTERVALS.map(n=>`<option value="${n}" ${apiSettings.autoInterval===n?'selected':''}>${n}대화마다</option>`).join('')}
+      </select></label>
       <div class="zmm-info">${esc(roomData.lastSync?'전체 수집 완료 시각(기기 기준): '+new Date(roomData.lastSync).toLocaleString('ko-KR'):'전체 수집 전입니다. 채팅방 새로고침 후 수집을 시작하세요.')}</div>
       <div class="zmm-row"><button data-act="tab" data-tab="conflicts">모순 정정</button><button data-act="tab" data-tab="remind">전체 서사 상기</button></div>
       <div class="zmm-info">API 호출 ${usage.calls||0}회 · 전체 토큰 ${((usage.input||0)+(usage.output||0)+(usage.thinking||0)).toLocaleString()}개</div>
@@ -1862,6 +1880,10 @@
       <label>모델 ID 직접 입력 (선택 사항) <input id="zmm-model" value="${esc(apiSettings.model)}" placeholder="${BASE_MODEL}" autocomplete="off"></label>
       <p class="zmm-muted">목록에서 모델을 고르면 위 입력칸이 바뀝니다. 원하는 모델 ID를 직접 입력해 저장할 수도 있습니다. 모델이 목록에 있어도 무료 등급에서 호출 가능한지는 계정에 따라 달라집니다.</p>
       <label class="zmm-line">새 대화 자동 분석 <input type="checkbox" data-field="auto" ${apiSettings.auto?'checked':''}></label>
+      <label class="zmm-line"><span>자동 분석 주기</span><select data-field="autoInterval" ${apiSettings.auto?'':'disabled'}>
+        ${AUTO_ANALYSIS_INTERVALS.map(n=>`<option value="${n}" ${apiSettings.autoInterval===n?'selected':''}>${n}대화마다</option>`).join('')}
+      </select></label>
+      <p class="zmm-muted">1·5·10대화 중 선택할 수 있습니다. 자동 분석 OFF는 수동 분석 전용입니다. 기존 설정의 기본값은 10대화입니다.</p>
       <h4>API 사용량 (이 스크립트에서 기록된 호출)</h4>
       <div class="zmm-metrics"><div><strong>${u.calls||0}</strong><span>호출</span></div>
       <div><strong>${(u.input||0).toLocaleString()}</strong><span>입력 토큰</span></div>
@@ -2456,7 +2478,22 @@
     });
     panel.addEventListener('change',async e=>{
       const target=e.target;
-      if(target.dataset.field==='auto'){apiSettings.auto=target.checked;saveSettings();setStatus(apiSettings.auto?'자동 분석 켬':'자동 분석 끔 · 로컬 수집은 유지');if(apiSettings.auto&&roomData?.fullyLoaded&&getApiKey())scheduleAnalysis(900);}
+      if(target.dataset.field==='auto'){
+        apiSettings.auto=target.checked;
+        if(!apiSettings.auto)clearTimeout(updateTimer);
+        saveSettings();setStatus(apiSettings.auto?'자동 분석 켬':'자동 분석 끔 · 로컬 수집은 유지');
+        if(apiSettings.auto&&roomData?.fullyLoaded&&getApiKey())scheduleAnalysis(900);
+        render();
+      }
+      if(target.dataset.field==='autoInterval'){
+        const n=Number(target.value);
+        if(AUTO_ANALYSIS_INTERVALS.includes(n)){
+          apiSettings.autoInterval=n;saveSettings();
+          setStatus('자동 분석 주기: '+n+'대화마다');
+          if(apiSettings.auto&&roomData?.fullyLoaded&&getApiKey())scheduleAnalysis(900);
+          render();
+        }
+      }
       if(target.dataset.field==='summaryLength'){ui.summaryLength=target.value;ui.lastOutput='';ui.lastOutputMode=null;render();}
       if(target.dataset.field==='timeline-select'){
         const id=target.dataset.id;
@@ -2502,6 +2539,7 @@
     setupDrag(pageButton,pageButton,'button');setupDrag($('.zmm-header',panel),panel,'panel');
     setupPanelResize(panel);
     apiSettings={...apiSettings,...getSettings()};
+    apiSettings.autoInterval=AUTO_ANALYSIS_INTERVALS.includes(Number(apiSettings.autoInterval))?Number(apiSettings.autoInterval):AUTO_ANALYSIS_DEFAULT_INTERVAL;
     apiSettings.billingMode=apiSettings.billingMode==='paid'?'paid':'free';
     apiSettings.model=/^[\w.-]{3,70}$/.test(apiSettings.model)?apiSettings.model:BASE_MODEL;
     render();
@@ -2635,6 +2673,7 @@
   });
   function init(){
     apiSettings={...apiSettings,...getSettings()};
+    apiSettings.autoInterval=AUTO_ANALYSIS_INTERVALS.includes(Number(apiSettings.autoInterval))?Number(apiSettings.autoInterval):AUTO_ANALYSIS_DEFAULT_INTERVAL;
     installBridge();installDomWatch();installIframeWatch();
     const ready=()=>{mount();sendBridge('identify');};
     if(document.readyState==='loading')document.addEventListener('DOMContentLoaded',ready,{once:true});else ready();
