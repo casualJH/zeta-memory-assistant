@@ -1137,6 +1137,19 @@
       mem.issues.push({id:newId('issue'),quote,reason,correction,evidenceQuote,errorType:type,
         sourceIds:newest,evidenceIds:older,status:'open',manual:false});changed++;
     }
+    // Attach observed source revisions to AI-produced memory. Older records
+    // without this map remain readable; manual memories are never overwritten.
+    const observedRevisions=new Map(chunkRows.map(row=>[row.id,Math.max(1,Number(row.revision)||1)]));
+    const captureRevisions=item=>{
+      if(!item||item.manual)return;
+      const linked=safeArray(item.sourceIds).filter(id=>observedRevisions.has(id));
+      if(!linked.length)return;
+      item.sourceVersions={...(item.sourceVersions||{})};
+      for(const id of linked)item.sourceVersions[id]=observedRevisions.get(id);
+    };
+    for(const kind of ['timeline','facts','characters','relations','knowledge','clues','emotions','issues'])
+      safeArray(mem[kind]).forEach(captureRevisions);
+    captureRevisions(mem.currentState);
     mem.updatedAt=Date.now();
     return changed;
   }
