@@ -81,7 +81,7 @@
   let dbPromise, mounted=false, bridgeReady=false, activeRoom=null, roomData=null;
   let msgMap=new Map(), analysisBusy=false, analysisStop=false, syncBusy=false, syncEpoch=0;
   let pageButton=null, panel=null, content=null, note=null;
-  let tab='home', ui={edit:null,searchResults:[],searchAnswer:'',searchQuestion:'',previewSource:null,summaryLength:'normal',lastOutput:'',reminderCache:null,reminderBusy:false,timelineSelection:[],timelineSelectionMode:false,peopleSubtab:'memory',buttonPos:null,dragged:false};
+  let tab='home', ui={edit:null,searchResults:[],searchAnswer:'',searchQuestion:'',previewSource:null,previewVersions:{},summaryLength:'normal',lastOutput:'',reminderCache:null,reminderBusy:false,timelineSelection:[],timelineSelectionMode:false,peopleSubtab:'memory',buttonPos:null,dragged:false};
   let apiSettings={auto:true,model:BASE_MODEL,billingMode:'free',inputRate:0.25,outputRate:1.50};
   let availableModels=[],modelFetchNote='아래 추천 모델 중 선택하거나 API 키로 모델 목록을 불러오세요.';
   let lastLiveSync=0, latestTimer=0, updateTimer=0, currentBridgeRoom=null;
@@ -676,7 +676,7 @@
   async function changeRoom(room){
     ++syncEpoch;analysisStop=true;analysisBusy=false;syncBusy=false;
     clearTimeout(latestTimer);clearTimeout(updateTimer);
-    activeRoom=room;msgMap=new Map();roomData=null;ui.previewSource=null;ui.peopleSubtab='memory';profileLoadRequestedRoom=null;
+    activeRoom=room;msgMap=new Map();roomData=null;ui.previewSource=null;ui.previewVersions={};ui.peopleSubtab='memory';profileLoadRequestedRoom=null;
     if(!room){setStatus('제타 채팅방을 열어 주세요.');render();return;}
     try{
       const loaded=await Promise.all([dbGet('rooms',room),dbRoomMessages(room)]);
@@ -1277,7 +1277,7 @@
   }
   function fmtRows(arr,kind,textFn){
     if(!arr.length)return '<div class="zmm-empty">저장된 기록이 없습니다.</div>';
-    return arr.map(item=>`<article class="zmm-item"><div class="zmm-item-text">${textFn(item)}</div>${sourceButtons(item.sourceIds)}${editButtons(kind,item)}</article>`).join('');
+    return arr.map(item=>`<article class="zmm-item"><div class="zmm-item-text">${hasStaleEvidence(item)?'<span class="zmm-pill">재검토 필요 · AI 상기/검색 제외</span>':''}${item.manual&&item.reviewStatus==='needs-review'?'<span class="zmm-pill">수동 기록 · 원문 변경 참고</span>':''}${textFn(item)}</div>${sourceButtons(item.sourceIds)}${editButtons(kind,item)}</article>`).join('');
   }
   function memoryArr(kind){return kind==='timeline'?roomData?.memory.timeline:
     kind==='characters'?roomData?.memory.characters:kind==='relations'?roomData?.memory.relations:
@@ -1297,6 +1297,7 @@
         <div><strong>${pending}</strong><span>미분석 대화</span></div>
         <div><strong>${m.issues.filter(i=>i.status==='open').length}</strong><span>모순 의심</span></div>
       </div>
+      <div class="zmm-info">Guardian 원문 변경 확인: ${safeArray(roomData.reviewQueue).filter(x=>x.status==='needs-review').length}개 원문 · 재검토 기억 ${['timeline','characters','relations','clues','facts','issues','knowledge','emotions'].reduce((n,k)=>n+safeArray(m[k]).filter(x=>x.reviewStatus==='needs-review').length,0)+(m.currentState?.reviewStatus==='needs-review'?1:0)}건. 기존 기억은 삭제하지 않으며 자동 재분석하지 않습니다.</div>
       <div class="zmm-row"><button class="zmm-main" data-act="full">과거 대화 전체 불러오기</button><button data-act="latest">최신 대화 확인</button></div>
       <div class="zmm-row"><button class="zmm-main" data-act="analyze">${analysisBusy?'분석 중…':'미분석 대화 요약'}</button><button data-act="stop">중지</button></div>
       <p class="zmm-muted">최초 1회 전체 수집이 완료되어야 분석할 수 있습니다. 자동 분석은 미분석 대화가 10개 이상 쌓이면 실행되며, 수동 요약은 개수에 관계없이 실행할 수 있습니다. API 키가 없으면 자동 분석하지 않습니다.</p>
@@ -1318,7 +1319,7 @@
     const blocks=[...grouping].map(([label,items])=>`<section class="zmm-day"><h3>${esc(label)}</h3>${items.map(x=>`
       <article class="zmm-item" data-timeline-item="${esc(x.id)}">
         ${selecting?`<label class="zmm-timeline-select"><input type="checkbox" data-field="timeline-select" data-id="${esc(x.id)}" ${chosen.has(x.id)?'checked':''}><span>이 사건 선택</span></label>`:''}
-        <div class="zmm-item-text">${x.timeType==='past'?'<span class="zmm-pill">과거 사건</span>':''}${x.title?`<strong class="zmm-episode-title">${esc(x.title)}</strong>`:''}<p>${esc(x.description)}</p></div>
+        <div class="zmm-item-text">${x.reviewStatus==='needs-review'?'<span class="zmm-pill">원문 변경 · 재검토 필요</span>':''}${x.timeType==='past'?'<span class="zmm-pill">과거 사건</span>':''}${x.title?`<strong class="zmm-episode-title">${esc(x.title)}</strong>`:''}<p>${esc(x.description)}</p></div>
         ${sourceButtons(x.sourceIds)}${editButtons('timeline',x)}
       </article>`).join('')}</section>`);
     const state=roomData?.memory?.currentState;
@@ -1719,8 +1720,12 @@
       if(!msg)return `<article class="zmm-item"><h4>원문 ${i+1}</h4>
         <p class="zmm-muted">저장된 원문을 찾지 못했습니다. 과거 대화 전체 불러오기를 실행하면 다시 확인할 수 있습니다.</p></article>`;
       return `<article class="zmm-item"><h4>원문 ${i+1} · ${esc(msg.speaker)}</h4>
-        <p class="zmm-muted">${esc(msg.kind==='info_box'?'상태창':'대화 지문')}</p>
+        <p class="zmm-muted">${esc(msg.kind==='info_box'?'상태창':'대화 지문')} · 현재 v${Number(msg.revision)||1} · ${esc(msg.position||'위치 미확인')}</p>
         <pre>${esc(msg.text)}</pre>
+        ${safeArray(ui.previewVersions?.[id]).length>1?'<details><summary>원문 변경 이력 ('+ui.previewVersions[id].length+'개 버전) · 비교하기</summary>'+
+          ui.previewVersions[id].map(v=>'<article class="zmm-item"><strong>v'+v.revision+' · '+esc(v.reason||'관찰된 원문')+'</strong>'+
+          '<p class="zmm-muted">'+esc(new Date(v.recordedAt).toLocaleString('ko-KR'))+'</p><pre>'+esc(v.text)+'</pre></article>').join('')+'</details>':
+          '<p class="zmm-muted">이전 원문 버전 없음</p>'}
         <div class="zmm-row"><button class="zmm-main" data-act="copy-source" data-id="${esc(msg.id)}">이 원문 복사</button>
         <button data-act="jump" data-id="${esc(msg.id)}">말풍선 이동</button></div></article>`;
     }).join('');
@@ -1961,9 +1966,15 @@
         const group=button.closest('.zmm-sources'),parsed=JSON.parse(group?.dataset.sourceIds||'null');
         if(Array.isArray(parsed)&&parsed.length)ids=parsed.filter(x=>typeof x==='string'&&x);
       }catch{}
-      ui.previewSource=ids;render();content.scrollTop=0;return;
+      ui.previewSource=ids;
+      ui.previewVersions={};
+      for(const sourceId of ids.slice(0,60)){
+        try{ui.previewVersions[sourceId]=await dbSourceVersions(activeRoom,sourceId);}
+        catch(e){log('원문 이력 조회 실패',e);}
+      }
+      render();content.scrollTop=0;return;
     }
-    if(act==='close-source'){ui.previewSource=null;render();content.scrollTop=0;return;}
+    if(act==='close-source'){ui.previewSource=null;ui.previewVersions={};render();content.scrollTop=0;return;}
     if(act==='jump'){jumpToSource(id);return;}
     if(act==='copy-source'){const src=findSource(id);if(src)clip(src.text);return;}
     if(act==='edit'){ui.edit={kind,id};ui.previewSource=null;render();return;}
