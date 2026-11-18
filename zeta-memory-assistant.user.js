@@ -224,9 +224,14 @@
     touch(mem.currentState);
     roomData.reviewQueue=safeArray(roomData.reviewQueue);
     for(const id of changedIds){
+      const hasLinked=REVIEW_KINDS.some(kind=>{
+        const items=kind==='currentState'?[mem.currentState]:safeArray(mem[kind]);
+        return items.some(item=>safeArray(item?.sourceIds).includes(id));
+      });
+      const nextStatus=hasLinked?'needs-review':'no-linked-memory';
       const existing=roomData.reviewQueue.find(x=>x.sourceId===id);
-      if(existing){existing.changedAt=at;existing.status='needs-review';}
-      else roomData.reviewQueue.push({sourceId:id,changedAt:at,status:'needs-review'});
+      if(existing){existing.changedAt=at;existing.status=nextStatus;}
+      else roomData.reviewQueue.push({sourceId:id,changedAt:at,status:nextStatus});
     }
     ui.reminderCache=null;
     ui.lastOutput='';ui.searchAnswer='';ui.searchResults=[];
@@ -1622,7 +1627,7 @@
   }
   function issuesMarkup(){
     const m=roomData?.memory;
-    const issues=(m?.issues||[]).filter(i=>i.status!=='dismissed');
+    const issues=(m?.issues||[]).filter(i=>i.status!=='dismissed'&&!hasStaleEvidence(i));
     return cardHeading('모순 감지 및 정정','AI 판단은 오류일 수 있습니다. 실제 원문과 비교한 뒤 정정문을 복사하세요.')+
       `<div class="zmm-row"><button class="zmm-main" data-act="copy-corrections">모순 정정문 복사</button><button data-act="dismiss-all">전체 오류 아님</button></div>`+
       (issues.length?issues.map(x=>`<article class="zmm-item zmm-warning"><strong>의심 지문</strong><p>“${esc(x.quote)}”</p>
@@ -1781,7 +1786,7 @@
     finally{ui.reminderBusy=false;}
   }
   function correctionsText(issue=null){
-    const issues=issue?[issue]:(roomData?.memory.issues||[]).filter(i=>i.status==='open');
+    const issues=issue?(hasStaleEvidence(issue)?[]:[issue]):(roomData?.memory.issues||[]).filter(i=>i.status==='open'&&!hasStaleEvidence(i));
     if(!issues.length)return '';
     const blocks=issues.map((x,i)=>{
       const evidence=safeArray(x.evidenceIds).map(id=>findSource(id)).filter(Boolean).map(s=>`[과거 원문 ${s.speaker}] ${truncate(s.text,350)}`).join('\n');
@@ -2192,7 +2197,7 @@
     if(act==='copy-corrections'){
       const text=correctionsText();ui.lastOutput=text;await clip(text);return;
     }
-    if(act==='copy-one'){const item=roomData.memory.issues.find(x=>x.id===id);if(item){ui.lastOutput=correctionsText(item);await clip(ui.lastOutput);}return;}
+    if(act==='copy-one'){const item=roomData.memory.issues.find(x=>x.id===id&&!hasStaleEvidence(x));if(item){ui.lastOutput=correctionsText(item);await clip(ui.lastOutput);}return;}
     if(act==='local-search'){searchQuestion(false);return;}
     if(act==='ai-search'){searchQuestion(true);return;}
     if(act==='preview-reminder'){await handleReminderAction(false);return;}
